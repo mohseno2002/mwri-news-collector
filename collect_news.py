@@ -130,8 +130,19 @@ def main():
     try: cur = json.loads(http(NEWS_URL, timeout=30)[1])
     except Exception: cur = None
     if health["state"] != "ok" and cur and cur.get("items"):
-        http(NEWS_URL, "PATCH", {"checkedAt": now, "health": health, "lastError": (errors or ["نتائج أقل من الحد الآمن"])[0]}, timeout=30)
-        state = "kept"
+        # جولة ناقصة (جوجل تُرجع 200 بلا عناصر أو 503 لبعض الزوايا): ما نجح يُدمج فى
+        # اللقطة القائمة بدل إهماله — الجديد يغلب، والقديم يبقى داخل نافذة ٧ أيام
+        cutoff = (datetime.now(timezone.utc).timestamp() - NEWS_DAYS * 86400) * 1000
+        old_items = [r for r in cur["items"] if isinstance(r, dict) and r.get("publishedAt") and
+                     datetime.fromisoformat(r["publishedAt"].replace("Z", "+00:00")).timestamp() * 1000 >= cutoff]
+        merged = dedupe(items + old_items)
+        if len(merged) > len(cur["items"]) or ok_feeds > 0 and items:
+            stamp = {"at": now, "checkedAt": now, "generatedAt": datetime.now(timezone.utc).isoformat(), "by": "central-github", "producer": "github-actions", "health": dict(health, merged=True)}
+            http(NEWS_URL, "PUT", dict(stamp, schema=1, contentHash=content_hash(merged), count=len(merged), n=len(merged), items=merged), timeout=60)
+            state = "merged(%d+%d→%d)" % (len(items), len(old_items), len(merged))
+        else:
+            http(NEWS_URL, "PATCH", {"checkedAt": now, "health": health, "lastError": (errors or ["نتائج أقل من الحد الآمن"])[0]}, timeout=30)
+            state = "kept"
     else:
         stamp = {"at": now, "checkedAt": now, "generatedAt": datetime.now(timezone.utc).isoformat(), "by": "central-github", "producer": "github-actions", "health": health}
         if cur and cur.get("contentHash") == h and cur.get("items"):
