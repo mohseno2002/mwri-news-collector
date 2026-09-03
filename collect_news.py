@@ -75,7 +75,7 @@ def parse_rss(xml, feed):
         row = {"centralRaw": 1, "sourceName": src[:120], "title": title[:190], "summary": (summary or title)[:220],
                "url": url[:1200], "publishedAt": pub.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                "feedId": feed["id"], "feedName": feed["name"]}
-        if ext and ext != url: row["externalId"] = ext[:600]
+        # externalId محذوف: ٣٩٢ بايت/عنصر بلا استعمال (التفريد بالرابط والعنوان)
         out.append(row)
     return out
 
