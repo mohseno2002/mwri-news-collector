@@ -58,6 +58,10 @@ def field(block, name):
     m = re.search(r"<" + name + r"(?:\s[^>]*)?>([\s\S]*?)</" + name + ">", block, re.I)
     return decode(m.group(1)) if m else ""
 def feed_url(q):
+    # زاوية قيمتها رابط كامل = موجز مباشر تُجلب كما هى (بوابة الوزارة · بينج ·
+    # اليوم السابع · موجزات جوجل غير البحثية). مقيس ٣/٩: /search وحده يُخنق.
+    q = (q or "").strip()
+    if q[:7].lower() == "http://" or q[:8].lower() == "https://": return q
     return "https://news.google.com/rss/search?q=" + urllib.parse.quote(q + " when:%dd" % NEWS_DAYS, safe="") + "&hl=ar&gl=EG&ceid=EG:ar"
 
 def parse_rss(xml, feed):
