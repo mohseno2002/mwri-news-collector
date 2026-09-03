@@ -138,10 +138,13 @@ def main():
             http(NEWS_URL, "PATCH", dict(stamp, count=len(cur["items"])), timeout=30); state = "unchanged"
         else:
             http(NEWS_URL, "PUT", dict(stamp, schema=1, contentHash=h, count=len(items), n=len(items), items=items), timeout=60); state = "stored"
-    ok = health["state"] == "ok" or state == "kept"
+    # النبضة: «kept» ليس نجاحاً — الجمع فشل وأُبقيت اللقطة القديمة؛ التشغيل يظهر أحمر فى Actions
+    ok = health["state"] == "ok"
+    summary = "%s · feeds %d/%d · items %d · %s · %.0fs" % (state, ok_feeds, len(feeds), len(items), health["state"], time.time() - started)
     try:
         curj = json.loads(http(JOB_URL, timeout=20)[1]) or {}
         body = {"last_ok": int(time.time()), "last_err": None, "fail_streak": 0} if ok else {"last_err": (errors or ["?"])[0][:200], "fail_streak": int(curj.get("fail_streak") or 0) + 1}
+        body["last_run"] = {"at": int(time.time()), "by": "github-actions", "summary": summary, "errors": errors[:6]}
         http(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
     print("state:", state)
