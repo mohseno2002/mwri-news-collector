@@ -81,13 +81,21 @@ def parse_rss(xml, feed):
 
 def fetch_one(url):
     try:
-        st, body = http(url, headers={"Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.5", "Accept-Language": "ar-EG,ar;q=0.9"})
+        # CONSENT: جوجل تردّ بصفحة موافقة (أو موجز فارغ) على العناوين التى
+        # تصنّفها سحابية/أوروبية ما لم يُرسَل الكوكى. فرضية قيد الاختبار ٣/٩.
+        st, body = http(url, headers={"Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.5",
+                                      "Accept-Language": "ar-EG,ar;q=0.9",
+                                      "Cookie": "CONSENT=YES+cb.20260903-00-p0.ar+FX+111"})
         if "<rss" not in body and "<feed" not in body: return {"ok": False, "why": "ليس RSS (صفحة اعتراض)"}
         # الخنق الناعم من جوجل: HTTP 200 بموجز RSS سليم وصفر <item>. كان يُحسب
         # نجاحاً فلا يدخل errors[] ولا تُعاد محاولته — وهو الفشل السائد فعلاً
         # (مقيس ٣/٩: ١٤/٢٩ زاوية «empty» بلا سبب واحد معلَن).
         if not re.search(r"<item[\s>]", body, re.I):
-            return {"ok": False, "why": "خنق ناعم: HTTP 200 بموجز فارغ", "soft": True}
+            # عيّنة من ردّ جوجل الحقيقى: الفرق بين «موجز سليم بصفر نتيجة»
+            # و«صفحة موافقة/اعتراض» لا يُعرف من رمز الحالة. مقيس ٣/٩: نفس
+            # الكود ١٠/١٠ من حاوية أنثروبيك و٠/١٠ من عامل GitHub.
+            sample = re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", body))[:120].strip()
+            return {"ok": False, "why": "موجز فارغ · ردّ جوجل: " + (sample or "(فارغ تماماً)"), "soft": True}
         return {"ok": True, "body": body}
     except urllib.error.HTTPError as e: return {"ok": False, "why": "HTTP %d" % e.code}
     except Exception as e: return {"ok": False, "why": str(e)[:80]}
