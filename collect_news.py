@@ -15,7 +15,7 @@ NEWS_URL = RTDB + "/mwri/apps/irrigation-social-monitor/data/central/news.json"
 JOB_URL = RTDB + "/mwri/jobs/news-central.json"
 SOURCES_URL = "https://mohseno2002.github.io/irrigation-social-monitor/sources-config.js"
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36 MWRI-NewsCollector/1.0"
-NEWS_DAYS, NEWS_LIMIT, FEED_LIMIT, WAVE, WAVE_GAP, TIMEOUT, RETRIES = 7, 600, 40, 4, 1.5, 15, 2
+NEWS_DAYS, NEWS_LIMIT, FEED_LIMIT, WAVE, WAVE_GAP, TIMEOUT, RETRIES = 7, 800, 40, 4, 1.5, 15, 2
 # SLICE: عدد الزوايا لكل جولة. مقيس ٣/٩: جوجل تخنق بالحجم لا بالتباعد —
 # ٢٩ زاوية × ٩٦ جولة = ~٢٨٠٠ طلب/يوم من مخرج واحد فيسقط المخرج كله
 # (سقط Cloudflare دائماً وSupabase مؤقتاً، وسقطت الحاوية أمام عينى فى ٨٠ث).
