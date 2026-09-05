@@ -294,7 +294,10 @@ def main():
         http(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
     if served_req:
-        try: http(JOB_URL, "PATCH", json.dumps({"refreshServedAt": served_req}).encode("utf-8"))
+        # http() يُسلسل الجسم بنفسه — يُمرَّر dict لا bytes. (تعارض توقيع
+        # دوال: التمرير المُسلسَل مسبقاً رفعه "Object of type bytes is not
+        # JSON serializable" فمرّ الرفع وفشل التسجيل صامتاً فى أول جولة.)
+        try: http(JOB_URL, "PATCH", {"refreshServedAt": served_req})
         except Exception as e: print("refreshServedAt:", e)
     print("state:", state)
     sys.exit(0 if ok else 1)
