@@ -40,6 +40,53 @@ def http(url, method="GET", body=None, headers=None, timeout=TIMEOUT):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read().decode("utf-8", "replace")
 
+# ===== بوابة الصلة — وضع القياس (٥/٩/٢٠٢٦) =====
+# تسِم ولا تحذف. السبب: البوابة تُسقط عند الإدخال فما تُسقطه لا يعود، فتُشغَّل
+# أولاً بلا حذف ليُحكَم على عيّنتها. معايرة على لقطة ٨٠٠ عنصر حيّة:
+#   عتبة ٢ → يبقى ٥٦٪ · عتبة ٣ → ٣٦٪ · عتبة ٤ → ٣٢٪
+#   عند العتبة ٣: تمرّ كل الأخبار المهنية المختبَرة (إزالة ١٠٢٤ تعدياً · ضبط
+#   نهر النيل · سد النهضة · الصرف المغطى · شكاوى مياه الشرب)، ويُرفض ٨٨٪ من
+#   أخبار الحوادث. والحجم ٣٦٢ ك.ب ← ١٣٠ ك.ب لو فُعِّل الحذف.
+# فخّان مقيسان بُنيا فى القواعد:
+#   ١) المطابقة بالكلمة الكاملة بعد تجريد السوابق — «ري» جزء من «الطريق»
+#      و«السد» من «تسديد»، والمطابقة الجزئية رفعت الدقة كذباً من ٤٣٪ إلى ٧٩٪.
+#   ٢) النفى يسقط أمام الدليل المهنى القوى — «ضبط» و«إزالة» كلمات حوادث،
+#      وهما صميم العمل فى «ضبط نهر النيل» و«إزالة تعديات».
+REL_THRESHOLD = 3
+TASHKEEL = re.compile(r"[\u0617-\u061A\u064B-\u0652\u0640]")
+def norm(t):
+    t = TASHKEEL.sub("", t or "")
+    t = t.replace("أ","ا").replace("إ","ا").replace("آ","ا").replace("ة","ه").replace("ى","ي").replace("ؤ","و").replace("ئ","ي")
+    return t
+PREFIX = ("وبال","فبال","بال","وال","فال","كال","لل","ال","و","ف","ب","ل","ك")
+def stem(w):
+    for p in PREFIX:
+        if w.startswith(p) and len(w) - len(p) >= 3: return w[len(p):]
+    return w
+def toks(t):
+    return set(stem(w) for w in re.findall(r"[\u0621-\u064A]+", norm(t)))
+
+CORE = set(norm(x) for x in """ترعه ترع مصرف مصارف مسقي مساقي رياح رياحات قناطر قناطر حبس اهوسه هويس
+منسوب مناسيب تصرف تصرفات تطهير تبطين تعديات تعدي حرم زمام مقنن ري ريه سقايه
+غمر تنقيط رشاش صرف مغطي بواره بوابه بوابات هدار سد سدود خزان بحيره فيضان جفاف عطش
+مزارعين فلاحين اراضي زراعيه محصول محاصيل ابار بئر جوفيه تحليه معالجه تلوث
+نيل رافد فرع مجري مجاري ميه مياه شرب انهار نهر جسر جسور طلمبات طلمبه محطه رفع
+نهضه اثيوبيا اثيوبي حلفا ناصر توشكي الروصيرص دنقلا حصه حصص مفاوضات اسنا نجع حمادي اسيوط ديروط""".split())
+BOOST = set(norm(x) for x in """وزاره الموارد المائيه سويلم مصلحه هيئه محافظه مديريه اداره
+الجيزه القاهره الاسماعيليه الشرقيه الدقهليه البحيره المنوفيه الفيوم بني سويف المنيا اسيوط سوهاج قنا اسوان الاقصر""".split())
+VETO = set(norm(x) for x in """قتل مقتل جريمه جثه سرقه لص متهم متهمين تشكيل عصابي مخدرات
+حريق اطفاء تصادم انقلاب سياره سيارات مرور دهس مباراه كوره لاعب هدف فنان فنانه اغنيه مسلسل فيلم
+بورصه اسهم عملات ذهب دولار حج عمره قرعه رياضه منتخب""".split())
+
+def score(title, summary=""):
+    tk = toks((title or "") + " " + (summary or ""))
+    core = len(tk & CORE); boost = len(tk & BOOST); veto = len(tk & VETO)
+    # النفى يُلغى إذا كان الدليل المهنى قوياً: خبران مثل «ضبط نهر النيل» و
+    # «إزالة تعديات» يحملان كلمات تبدو حوادثية وهما صميم العمل. مقيس على
+    # لقطة ٨٠٠ عنصر: بلا هذا الشرط سقط خبر إزالة ١٠٢٤ تعدياً وهو أهم ما ورد.
+    pen = 0 if core >= 2 else veto * 3
+    return core * 2 + min(boost, 2) - pen, core, boost, veto
+
 def load_feeds():
     try:
         _, js = http(SOURCES_URL, timeout=15)
@@ -251,6 +298,16 @@ def main():
                 old_items.append(r)
         except Exception: continue
     merged = dedupe(fresh + old_items)
+    # وضع القياس: نحسب ما كانت البوابة سترفضه ولا نحذف شيئاً.
+    rel_scores = [score(r.get("title"), r.get("summary"))[0] for r in merged]
+    rel_keep = sum(1 for v in rel_scores if v >= REL_THRESHOLD)
+    rel_sample = [r.get("title", "")[:90] for r, v in zip(merged, rel_scores) if v < REL_THRESHOLD][:5]
+    rel_probe = {"at": int(time.time() * 1000), "threshold": REL_THRESHOLD,
+                 "total": len(merged), "wouldKeep": rel_keep,
+                 "wouldDrop": len(merged) - rel_keep, "mode": "measure",
+                 "dropSample": rel_sample}
+    print("بوابة الصلة (قياس فقط): يبقى %d من %d (%.0f%%) · يُرفض %d"
+          % (rel_keep, len(merged), 100.0 * rel_keep / max(len(merged), 1), len(merged) - rel_keep))
     status = merge_status(prev_status, results, now)
     live_ok = sum(1 for r in status if r.get("state") == "ok")
     health = {"state": "ok" if ok_feeds >= (len(take) + 1) // 2 and len(merged) >= 10 else "degraded",
@@ -293,6 +350,8 @@ def main():
                            "fail_streak": int(job.get("fail_streak") or 0) + 1})
         http(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
+    try: http(JOB_URL, "PATCH", {"relevanceProbe": rel_probe})
+    except Exception as e: print("relevanceProbe:", e)
     if served_req:
         # http() يُسلسل الجسم بنفسه — يُمرَّر dict لا bytes. (تعارض توقيع
         # دوال: التمرير المُسلسَل مسبقاً رفعه "Object of type bytes is not
