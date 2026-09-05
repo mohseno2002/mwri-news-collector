@@ -37,6 +37,11 @@ def http(url, method="GET", body=None, headers=None, timeout=TIMEOUT):
 def load_feeds():
     try:
         _, js = http(SOURCES_URL, timeout=15)
+        # ٥/٩/٢٠٢٦ — قصّ الملف عند قائمة المتقاعدين قبل التنزيع. التنزيع هنا
+        # بتعبير نمطى على الملف كله لا بقراءة الكائن المُصدَّر، فإخراج زاوية
+        # من centralFeeds وحده لا يوقفها: مقيس اليوم — بعد تقاعد ١٦ زاوية ظل
+        # المجمّع يحمّل ٤٢ زاوية بدل ٢٦ لأنه التقط قائمة المتقاعدين أيضاً.
+        js = js.split("var retiredFeeds")[0]
         feeds = [{"id": m[0], "name": m[1], "query": m[2] if m[2] else m[3]} for m in FEED_RE.findall(js)]
         for slug, nm in GRP_RE.findall(js):
             feeds.append({"id": "fbgrp_" + slug, "name": nm,
@@ -147,12 +152,18 @@ def read_json(url, timeout=30):
     except Exception: return None
 
 def rotate(feeds, cursor):
-    """شريحة الجولة بالتناوب الدائرى — الفهرس محفوظ فى عقدة المهمة لأن
-       عامل Actions بلا حالة بين الجولات."""
-    n = len(feeds)
-    if n <= SLICE: return list(feeds), 0
-    take = [feeds[(cursor + k) % n] for k in range(SLICE)]
-    return take, (cursor + SLICE) % n
+    """شريحة الجولة: القسمة بالمنبع لا بالعدد.
+       ٥/٩/٢٠٢٦ — المصادر التى لا تمرّ بـnews.google.com (بوابة الوزارة ·
+       بينج) لا تدخل ميزانية جوجل ولا تُخنق، فتُجلب فى كل جولة بدل مرة كل
+       دورة. وزوايا جوجل وحدها هى التى تدور بـSLICE، والمؤشّر يدور على
+       قائمتها هى — وإلا تسرّبت المباشرة من الدوران واختلّ الفهرس.
+       الفهرس محفوظ فى عقدة المهمة لأن عامل Actions بلا حالة بين الجولات."""
+    direct = [f for f in feeds if not feed_url(f["query"]).startswith("https://news.google.com/")]
+    goog = [f for f in feeds if feed_url(f["query"]).startswith("https://news.google.com/")]
+    n = len(goog)
+    if n <= SLICE: return direct + list(goog), 0
+    take = [goog[(cursor + k) % n] for k in range(SLICE)]
+    return direct + take, (cursor + SLICE) % n
 
 def merge_status(prev, results, now):
     """حالة الزوايا تراكمية: الشريحة الحالية تُحدَّث، وغيرها تحتفظ بآخر
