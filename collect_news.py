@@ -185,9 +185,41 @@ def merge_status(prev, results, now):
         if r.get("at"): r["ageMin"] = int((now - r["at"]) / 60000)
     return list(by_id.values())
 
+# ٥/٩/٢٠٢٦ — بوابة الطلب اليدوى بلا أى سرّ. المسار الأصلى كان: الزر يستدعى
+# وركر كلاودفلير فيُطلق workflow_dispatch — وهو يحتاج رمز جيتهب مخزّناً فى
+# الوركر. البديل هنا: الزر يكتب طابعاً فى /mwri/jobs/news-central/refreshReq
+# (القاعدة تقبل الكتابة داخل /mwri)، وهذه المهمة تعمل كل خمس دقائق فتتخطّى
+# فوراً إلا إذا مرّ MIN_GAP_SEC على آخر جمع أو وُجد طلب يدوى لم يُخدَم بعد.
+# الجولة المتخطّاة تنتهى فى ثوانٍ ولا تلمس جوجل ولا تكتب اللقطة، فالحمل
+# اليومى على جوجل لا يتغيّر: ~٤٨ جولة فعلية لا ٢٨٨.
+MIN_GAP_SEC = 25 * 60
+REQ_MAX_AGE_SEC = 20 * 60
+
+def should_run(job):
+    """قرار التشغيل: (يعمل؟, السبب, طابع الطلب المخدوم)."""
+    now = time.time()
+    try: last = float(job.get("last_ok") or 0)
+    except Exception: last = 0.0
+    gap = now - last
+    req = (job.get("refreshReq") or {})
+    try: req_at = float(req.get("at") or 0) / 1000.0
+    except Exception: req_at = 0.0
+    served = 0.0
+    try: served = float(job.get("refreshServedAt") or 0) / 1000.0
+    except Exception: served = 0.0
+    fresh_req = req_at > served and (now - req_at) <= REQ_MAX_AGE_SEC
+    if fresh_req: return True, "طلب يدوى", req.get("at")
+    if gap >= MIN_GAP_SEC: return True, "الدورة المجدولة (%.0f دقيقة)" % (gap / 60), None
+    return False, "تخطٍّ — آخر جمع منذ %.0f دقيقة ولا طلب يدوى" % (gap / 60), None
+
 def main():
-    started = time.time(); feeds, src = load_feeds()
+    started = time.time()
     job = read_json(JOB_URL, timeout=20) or {}
+    run, why, served_req = should_run(job)
+    print("بوابة:", why)
+    if not run:
+        sys.exit(0)
+    feeds, src = load_feeds()
     try: cursor = int(job.get("cursor") or 0)
     except Exception: cursor = 0
     take, next_cursor = rotate(feeds, cursor)
@@ -261,6 +293,9 @@ def main():
                            "fail_streak": int(job.get("fail_streak") or 0) + 1})
         http(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
+    if served_req:
+        try: http(JOB_URL, "PATCH", json.dumps({"refreshServedAt": served_req}).encode("utf-8"))
+        except Exception as e: print("refreshServedAt:", e)
     print("state:", state)
     sys.exit(0 if ok else 1)
 
