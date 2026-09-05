@@ -142,7 +142,9 @@ def parse_rss(xml, feed):
         except Exception: pub = datetime.now(timezone.utc)
         if not title: continue
         row = {"centralRaw": 1, "sourceName": src[:120], "title": title[:190], "summary": (summary or title)[:220],
-               "url": url[:1200], "publishedAt": pub.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+               # ٥/٩/٢٠٢٦ — كان [:1200] فيبتر روابط جوجل الطويلة (مقيس: ٦٧ من ٧٧٢
+               # فى اللقطة الحية مبتورة تفتح 400 عند الضغط). الرابط لا يُقصّ.
+               "url": url[:4000], "publishedAt": pub.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                "feedId": feed["id"], "feedName": feed["name"]}
         # externalId محذوف: ٣٩٢ بايت/عنصر بلا استعمال (التفريد بالرابط والعنوان)
         out.append(row)
@@ -191,14 +193,104 @@ def fetch_all(urls):
         for s in range(0, len(soft), WAVE): wave(soft[s:s + WAVE])
     return out
 
+# ===== حلّ روابط جوجل المبهمة إلى الرابط الحقيقى (٥/٩/٢٠٢٦) =====
+# مقيس على ٥٠ رابطاً حياً: الفكّ المحلى صفر، التحويلة HTTP صفر (تحوّل إلى
+# نفسها)، والمسار العامل: صفحة المقال (توقيع data-n-a-sg + طابع data-n-a-ts)
+# ثم نداء batchexecute — ٤٢/٥٠ فى ٥٫٦ ث بخمسة خيوط، والثمانية الباقية كانت
+# روابط مبتورة بالقصّ [:1200] لا فشلاً فى الحلّ. نداء غير موثّق من جوجل وقد
+# يتغيّر: فشله لا يُسقط خبراً — يبقى الرابط المبهم كما هو.
+# المكسب: التفريد بالرابط الحقيقى (الخبر الواحد من ٤ زوايا برابط مبهم مختلف
+# كل مرة)، واسم المصدر من النطاق بدل «موقع إخباري»، و~٤٠٠ بايت أقل لكل عنصر.
+RESOLVE_BUDGET, RESOLVE_THREADS, RESOLVE_DEADLINE_SEC, RESOLVE_TIMEOUT = 250, 5, 60, 8
+GNEWS_ART = "news.google.com/rss/articles/"
+HOST_NAMES = {"youm7.com": "اليوم السابع", "shorouknews.com": "بوابة الشروق", "almasryalyoum.com": "المصري اليوم",
+    "gate.ahram.org.eg": "بوابة الأهرام", "ahram.org.eg": "الأهرام", "english.ahram.org.eg": "Ahram Online",
+    "elwatannews.com": "الوطن", "masrawy.com": "مصراوي", "elbalad.news": "صدى البلد", "cairo24.com": "القاهرة 24",
+    "dostor.org": "الدستور", "akhbarelyom.com": "بوابة أخبار اليوم", "vetogate.com": "فيتو", "elfagr.org": "الفجر",
+    "sis.gov.eg": "الهيئة العامة للاستعلامات", "mwri.gov.eg": "وزارة الموارد المائية والري", "mfa.gov.eg": "وزارة الخارجية",
+    "elaosboa.com": "الأسبوع", "soutalomma.com": "صوت الأمة", "maspero.eg": "ماسبيرو", "darelhilal.com": "دار الهلال",
+    "alwafd.org": "الوفد", "gomhuriaonline.com": "الجمهورية", "almalnews.com": "المال", "alborsanews.com": "البورصة",
+    "elmuashir.com": "المؤشر", "elmogaz.com": "الموجز", "albawabhnews.com": "البوابة نيوز", "masralarabia.net": "مصر العربية",
+    "alnaharegypt.com": "النهار", "egypttoday.com": "Egypt Today", "dailynewsegypt.com": "Daily News Egypt",
+    "aljazeera.net": "الجزيرة", "alarabiya.net": "العربية", "skynewsarabia.com": "سكاي نيوز عربية", "bbc.com": "BBC",
+    "arabic.rt.com": "RT Arabic", "france24.com": "فرانس 24", "alhurra.com": "الحرة", "independentarabia.com": "اندبندنت عربية",
+    "youm7.news": "اليوم السابع", "elkhabar.com": "الخبر", "mubasher.info": "مباشر", "amwalalghad.com": "أموال الغد"}
+GENERIC_SRC = ("موقع إخباري", "")
+def host_of(u):
+    try: h = urllib.parse.urlparse(u).netloc.lower()
+    except Exception: return ""
+    return h[4:] if h.startswith("www.") else h
+def source_from_host(h):
+    if not h: return ""
+    if h in HOST_NAMES: return HOST_NAMES[h]
+    parts = h.split(".")
+    for k in range(1, len(parts) - 1):
+        if ".".join(parts[k:]) in HOST_NAMES: return HOST_NAMES[".".join(parts[k:])]
+    return h   # النطاق نفسه — اسم صادق، والتطبيق يقرأ facebook/addisstandard منه
+def resolve_gnews(u):
+    """الرابط المبهم → الحقيقى أو None. لا يرفع استثناءً أبداً."""
+    try:
+        m = re.search(r"/articles/([^?]+)", u)
+        if not m: return None
+        aid = m.group(1)
+        _, html = http(u, headers={"Accept": "text/html"}, timeout=RESOLVE_TIMEOUT)
+        sg = re.search(r'data-n-a-sg="([^"]+)"', html); ts = re.search(r'data-n-a-ts="([^"]+)"', html)
+        if not (sg and ts): return None
+        inner = json.dumps(["garturlreq", [["X", "X", ["en-US", "US"], None, None, 1, 1, "US:en", None, 180,
+                            None, None, None, None, None, 0, None, None, [1608992183, 723341000]],
+                            "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0], aid, int(ts.group(1)), sg.group(1)])
+        body = urllib.parse.urlencode({"f.req": json.dumps([[["Fbv4je", inner, None, "generic"]]])}).encode()
+        req = urllib.request.Request("https://news.google.com/_/DotsSplashUi/data/batchexecute", data=body, method="POST",
+                                     headers={"User-Agent": UA, "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"})
+        with urllib.request.urlopen(req, timeout=RESOLVE_TIMEOUT) as r: txt = r.read().decode("utf-8", "replace")
+        line = [l for l in txt.split("\n") if l.startswith('[["wrb.fr"')]
+        real = json.loads(json.loads(line[0])[0][2])[1]
+        if isinstance(real, str) and (real[:8].lower() == "https://" or real[:7].lower() == "http://"): return real[:4000]
+    except Exception: pass
+    return None
+def resolve_rows(rows, budget=RESOLVE_BUDGET, deadline_sec=RESOLVE_DEADLINE_SEC):
+    """يحلّ فى مكانه ما لا يزيد على budget رابطاً مبهماً من rows بالترتيب،
+       ويقف عند المهلة. يعيد (حُلّ, فشل, فى الانتظار)."""
+    pending = [r for r in rows if isinstance(r, dict) and GNEWS_ART in (r.get("url") or "") and not r.get("rf")]
+    for r in pending:
+        if len(r["url"]) == 1200: r["rf"] = 1   # مبتور من قصّ [:1200] القديم — لا يُحلّ أبداً
+    pending = [r for r in pending if not r.get("rf")]
+    todo = pending[:max(0, budget)]
+    if not todo: return 0, 0, len(pending)
+    t0 = time.time(); done = fail = 0
+    def one(r):
+        if time.time() - t0 > deadline_sec: return None
+        return resolve_gnews(r["url"])
+    with cf.ThreadPoolExecutor(RESOLVE_THREADS) as ex:
+        for r, real in zip(todo, ex.map(one, todo)):
+            if real:
+                r["url"] = real; done += 1
+                if clean(r.get("sourceName")) in GENERIC_SRC or "." in clean(r.get("sourceName")):
+                    r["sourceName"] = source_from_host(host_of(real))[:120]
+            else:
+                fail += 1; r["rf"] = 1   # يُترك كما هو ولا يُعاد فى الجولات التالية
+    waiting = sum(1 for r in rows if isinstance(r, dict) and GNEWS_ART in (r.get("url") or ""))
+    return done, fail, waiting
+
 def norm_title(v):
     s = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", clean(v)); s = re.sub(r"[أإآٱ]", "ا", s).replace("ى", "ي")
     return re.sub(r"[^\u0600-\u06FFA-Za-z0-9]+", " ", s).strip().lower()
 def dedupe(rows):
+    # الرابط المحلول يغلب المبهم عند تساوى العنوان — مقيس ٥/٩: الخبر الواحد
+    # يعود من زاويتين بطابعَى نشر مختلفين، فكان الأحدث (المبهم) يطرد نسخته
+    # المحلولة ويُضيع الحلّ فى كل جولة (٣٠٤ صفاً محلولاً غاب من المدموج).
+    best = {}
+    for r in rows:
+        u = clean(r.get("url") or "")
+        if u and GNEWS_ART not in u: best.setdefault(norm_title(r["title"])[:120], (u, r.get("sourceName") or ""))
     rows.sort(key=lambda r: r["publishedAt"], reverse=True)
     seen_u, seen_t, out = set(), set(), []
     for r in rows:
-        tk = norm_title(r["title"])[:120]; uk = clean(r["url"])
+        tk = norm_title(r["title"])[:120]
+        if GNEWS_ART in (r.get("url") or "") and tk in best:
+            r["url"] = best[tk][0]
+            if best[tk][1]: r["sourceName"] = best[tk][1]
+        uk = clean(r["url"])
         if (uk and uk in seen_u) or tk in seen_t: continue
         if uk: seen_u.add(uk)
         seen_t.add(tk); out.append(r)
@@ -305,6 +397,17 @@ def main():
                 old_items.append(r)
         except Exception: continue
     merged = dedupe(fresh + old_items)
+    # الحلّ **بعد** الدمج والقصّ لا قبله — مقيس ٥/٩: الحلّ قبل الدمج أنفق
+    # الميزانية على ٢٩٠ صفاً طازجاً أقدم من حدّ الـ٨٠٠ فسقطت بعد حلّها، وبقى
+    # المبهم عند ~٤٤٥ ثلاث جولات. الآن تُحلّ الصفوف التى ستُخزَّن فعلاً (الأحدث
+    # أولاً) ثم دمج ثانٍ يطوى ما التقى على رابط حقيقى واحد؛ والنسخة الطازجة
+    # المبهمة لخبر محلول سابقاً ترث رابطه داخل dedupe بمفتاح العنوان.
+    # محاكاة ٤ جولات على اللقطة الحية: مبهم ٦٧٩ ← ٤٢٨ ← ١٧٨ ← ٤١ (الـ٤١ مبتورة
+    # قديمة موسومة rf) · صفر فشل · الحجم ٨٤٣ ← ٧٣٢ ك.ب.
+    r_done, r_fail, r_wait = resolve_rows(merged)
+    if r_done: merged = dedupe(merged)
+    resolve_stat = {"done": r_done, "fail": r_fail, "waiting": max(0, r_wait - r_done)}
+    print("حلّ الروابط: %d حُلّ · %d فشل · %d بالانتظار" % (r_done, r_fail, resolve_stat["waiting"]))
     # وضع القياس: نحسب ما كانت البوابة سترفضه ولا نحذف شيئاً.
     rel_scores = [score(r.get("title"), r.get("summary"))[0] for r in merged]
     rel_keep = sum(1 for v in rel_scores if v >= REL_THRESHOLD)
@@ -323,7 +426,8 @@ def main():
               "failedFeeds": len(feeds) - live_ok,
               "emptyFeeds": len(empty), "emptyFeedNames": empty[:8],
               "feedStatus": status, "merged": True,
-              "runMs": int((time.time() - started) * 1000), "errors": errors[:8], "feedsSrc": src}
+              "runMs": int((time.time() - started) * 1000), "errors": errors[:8], "feedsSrc": src,
+              "resolve": resolve_stat}
     print("شريحة %d/%d (مؤشر %d→%d) · جديد %d · مدموج %d · %s · %.1fث"
           % (ok_feeds, len(take), cursor, next_cursor, len(fresh), len(merged), health["state"], time.time() - started))
     for e in errors[:6]: print("  ", e)
