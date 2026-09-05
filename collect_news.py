@@ -248,6 +248,22 @@ def resolve_gnews(u):
         if isinstance(real, str) and (real[:8].lower() == "https://" or real[:7].lower() == "http://"): return real[:4000]
     except Exception: pass
     return None
+def unwrap_cheap(rows):
+    """بلا شبكة: رابط بينج التحويلى يحمل الرابط الحقيقى فى معامل url،
+       والاسم العام «موقع إخباري» يُشتق من النطاق لأى صف رابطه حقيقى
+       (اليوم السابع المباشر وبينج كانا يبقيان عامَّين — مقيس ٥/٩: ١٢٥ صفاً)."""
+    n = 0
+    for r in rows:
+        if not isinstance(r, dict): continue
+        u = r.get("url") or ""
+        if "bing.com/news/apiclick" in u:
+            try:
+                real = urllib.parse.parse_qs(urllib.parse.urlparse(u).query).get("url", [""])[0]
+                if real[:8].lower() == "https://" or real[:7].lower() == "http://": r["url"] = real[:4000]; u = real
+            except Exception: pass
+        if clean(r.get("sourceName")) in GENERIC_SRC and GNEWS_ART not in u and u[:4] == "http":
+            r["sourceName"] = source_from_host(host_of(u))[:120]; n += 1
+    return n
 def resolve_rows(rows, budget=RESOLVE_BUDGET, deadline_sec=RESOLVE_DEADLINE_SEC):
     """يحلّ فى مكانه ما لا يزيد على budget رابطاً مبهماً من rows بالترتيب،
        ويقف عند المهلة. يعيد (حُلّ, فشل, فى الانتظار)."""
@@ -405,8 +421,9 @@ def main():
     # محاكاة ٤ جولات على اللقطة الحية: مبهم ٦٧٩ ← ٤٢٨ ← ١٧٨ ← ٤١ (الـ٤١ مبتورة
     # قديمة موسومة rf) · صفر فشل · الحجم ٨٤٣ ← ٧٣٢ ك.ب.
     r_done, r_fail, r_wait = resolve_rows(merged)
-    if r_done: merged = dedupe(merged)
-    resolve_stat = {"done": r_done, "fail": r_fail, "waiting": max(0, r_wait - r_done)}
+    named = unwrap_cheap(merged)
+    if r_done or named: merged = dedupe(merged)
+    resolve_stat = {"done": r_done, "fail": r_fail, "waiting": r_wait, "named": named}
     print("حلّ الروابط: %d حُلّ · %d فشل · %d بالانتظار" % (r_done, r_fail, resolve_stat["waiting"]))
     # وضع القياس: نحسب ما كانت البوابة سترفضه ولا نحذف شيئاً.
     rel_scores = [score(r.get("title"), r.get("summary"))[0] for r in merged]
