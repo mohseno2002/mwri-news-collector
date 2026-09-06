@@ -377,6 +377,45 @@ def rotate(feeds, cursor):
     take = [goog[(cursor + k) % n] for k in range(SLICE)]
     return direct + take, (cursor + SLICE) % n
 
+# ٦/٩/٢٠٢٦ — م0 القياس: ختم seenAt (أول مرة رأى المجمّع الخبر) لا يُلمس بعدها،
+# وتأخير الوصول = seenAt − publishedAt يُحسب للجديد فى كل جولة. الخطة لا تعد
+# بـ«≤١٥ دقيقة» قبل معرفة التأخير الحقيقى لمسار جوجل.
+def carry_seen(rows, old_rows, now_ms, prev_at_ms):
+    seen = {}
+    for r in old_rows:
+        v = r.get("seenAt") or prev_at_ms
+        if not v: continue
+        for k in (clean(r.get("url")), story_key(r.get("title")), norm_title(r.get("title"))[:120]):
+            if k and k not in seen: seen[k] = v
+    new_rows = []
+    for r in rows:
+        if r.get("seenAt"): continue
+        hit = None
+        for k in (clean(r.get("url")), story_key(r.get("title")), norm_title(r.get("title"))[:120]):
+            if k and k in seen: hit = seen[k]; break
+        r["seenAt"] = hit or now_ms
+        if not hit: new_rows.append(r)
+    return new_rows
+
+def latency_stats(new_rows, now_ms):
+    lags = []
+    for r in new_rows:
+        try: p = datetime.fromisoformat(r["publishedAt"].replace("Z", "+00:00")).timestamp() * 1000
+        except Exception: continue
+        lag = (now_ms - p) / 60000.0
+        if lag < 0: lag = 0.0
+        lags.append((lag, r.get("feedId") or "?"))
+    fresh = sorted(l for l, _ in lags if l <= 360)   # الجديد خلال ٦ ساعات فقط — ما فوقها مسحة أسبوعية لا تأخير
+    def pct(a, q):
+        if not a: return None
+        i = min(len(a) - 1, int(round(q * (len(a) - 1)))); return round(a[i], 1)
+    by = {}
+    for l, f in lags:
+        if l <= 360: by.setdefault(f, []).append(l)
+    return {"new": len(lags), "fresh": len(fresh), "medianMin": pct(fresh, 0.5), "p90Min": pct(fresh, 0.9),
+            "within15": sum(1 for l in fresh if l <= 15), "within60": sum(1 for l in fresh if l <= 60),
+            "byFeed": {f: {"n": len(v), "medianMin": pct(sorted(v), 0.5)} for f, v in by.items()}}
+
 def merge_status(prev, results, now, active_ids=None):
     """حالة الزوايا تراكمية: الشريحة الحالية تُحدَّث، وغيرها تحتفظ بآخر
        نتيجة معروفة مع عمرها — وإلا بدت ١٩ زاوية «فارغة» وهى لم تُسأل أصلاً."""
@@ -539,6 +578,10 @@ def main():
             gate.update({"mode": "drop", "kept": len(keep), "dropped": len(dropped),
                          "dropSample": [r.get("title", "")[:90] for r in dropped[:5]]})
             print("بوابة الصلة: يبقى %d من %d (%.0f%%) · حُذف %d" % (len(keep), gate["total"], 100.0 * len(keep) / max(gate["total"], 1), len(dropped)))
+    prev_at_ms = (cur or {}).get("at") or 0
+    new_rows = carry_seen(merged, old_items, int(started * 1000), prev_at_ms)
+    latency = latency_stats(new_rows, int(started * 1000))
+    print("تأخير الوصول: جديد %d · طازج %d · وسيط %s د · p90 %s د · ≤١٥د %d" % (latency["new"], latency["fresh"], latency["medianMin"], latency["p90Min"], latency["within15"]))
     r_done, r_fail, r_wait = resolve_rows(merged)
     named = unwrap_cheap(merged)
     if r_done or named: merged = dedupe(merged)
@@ -546,7 +589,11 @@ def main():
     print("حلّ الروابط: %d حُلّ · %d فشل · %d بالانتظار" % (r_done, r_fail, resolve_stat["waiting"]))
     status = merge_status(prev_status, results, now, active_ids if purge_ok else None)
     live_ok = sum(1 for r in status if r.get("state") == "ok")
-    health = {"state": "ok" if ok_feeds >= (len(take) + 1) // 2 and len(merged) >= 10 else "degraded",
+    lat48 = [x for x in ((job.get("latencyLog") or []) if isinstance(job.get("latencyLog"), list) else []) if isinstance(x, dict) and x.get("medianMin") is not None and started * 1000 - (x.get("at") or 0) <= 48 * 3600000]
+    med48 = sorted(x["medianMin"] for x in lat48)
+    health_latency = {"medianMin": latency["medianMin"], "p90Min": latency["p90Min"], "fresh": latency["fresh"], "within15": latency["within15"],
+                      "median48h": (med48[len(med48) // 2] if med48 else None), "rounds48h": len(lat48)}
+    health = {"latency": health_latency, "state": "ok" if ok_feeds >= (len(take) + 1) // 2 and len(merged) >= 10 else "degraded",
               "successfulFeeds": live_ok, "totalFeeds": len(feeds),
               "sliceOk": ok_feeds, "sliceSize": len(take), "cursor": cursor,
               "failedFeeds": len(feeds) - live_ok,
@@ -595,7 +642,11 @@ def main():
         if sweep: body["lastSweepAt"] = int(started)
         write(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
-    try: write(JOB_URL, "PATCH", {"relevanceGate": gate})
+    # سجلّ متدحرج لآخر ٩٦ جولة (~يومان) فى عقدة المهمة — منه يُحسب تقرير الـ٤٨ ساعة
+    log = [x for x in ((job.get("latencyLog") or []) if isinstance(job.get("latencyLog"), list) else []) if isinstance(x, dict)]
+    log.append({"at": int(started * 1000), "roundNo": round_no, "window": "7d" if sweep else "1d", "fresh": latency["fresh"], "medianMin": latency["medianMin"], "p90Min": latency["p90Min"], "within15": latency["within15"], "within60": latency["within60"]})
+    log = log[-96:]
+    try: write(JOB_URL, "PATCH", {"relevanceGate": gate, "latency": dict(latency, at=int(started * 1000), roundNo=round_no), "latencyLog": log})
     except Exception as e: print("relevanceProbe:", e)
     if served_req:
         # http() يُسلسل الجسم بنفسه — يُمرَّر dict لا bytes. (تعارض توقيع
