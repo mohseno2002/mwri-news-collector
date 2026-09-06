@@ -46,7 +46,7 @@ SWEEP_INTERVAL_SEC = 60 * 60
 PARSE_MAX = 200
 # تجربة جافة: تقرأ وتجلب ولا تكتب حرفاً فى القاعدة الحية (مسبار قبل الرفع).
 DRY = os.environ.get("COLLECT_DRY") == "1"
-FEED_RE = re.compile(r'\{\s*id:\s*"([^"]+)",\s*name:\s*"([^"]+)",\s*query:\s*(?:\'([^\']*)\'|"([^"]*)")\s*\}')
+FEED_RE = re.compile(r'\{\s*id:\s*"([^"]+)",\s*name:\s*"([^"]+)",\s*query:\s*(?:\'([^\']*)\'|"([^"]*)")(?:\s*,\s*tier:\s*"([^"]+)")?\s*\}')
 GRP_RE = re.compile(r'\{\s*slug:\s*"([^"]+)",\s*nm:\s*"([^"]+)"')
 
 def http(url, method="GET", body=None, headers=None, timeout=TIMEOUT):
@@ -131,7 +131,7 @@ def load_feeds():
         # من centralFeeds وحده لا يوقفها: مقيس اليوم — بعد تقاعد ١٦ زاوية ظل
         # المجمّع يحمّل ٤٢ زاوية بدل ٢٦ لأنه التقط قائمة المتقاعدين أيضاً.
         js = js.split("var retiredFeeds")[0]
-        feeds = [{"id": m[0], "name": m[1], "query": m[2] if m[2] else m[3]} for m in FEED_RE.findall(js)]
+        feeds = [{"id": m[0], "name": m[1], "query": m[2] if m[2] else m[3], "tier": m[4] or "fast"} for m in FEED_RE.findall(js)]
         # priorityGroups للعرض فقط؛ لا تُعاد إلى زوايا الجمع المتقاعدة.
         # القاموس يُحمَّل هنا فى متغير الوحدة لا فى قيمة الرجوع — توقيع load_feeds
         # عقدٌ تعتمد عليه test_schedule.py (تعارض توقيع الدوال: درس مقيَّد فى البنك).
@@ -401,7 +401,24 @@ def merge_status(prev, results, now, active_ids=None):
 # فوراً إلا إذا مرّ MIN_GAP_SEC على آخر جمع أو وُجد طلب يدوى لم يُخدَم بعد.
 # الجولة المتخطّاة تنتهى فى ثوانٍ ولا تلمس جوجل ولا تكتب اللقطة، فالحمل
 # اليومى على جوجل لا يتغيّر: ~٤٨ جولة فعلية لا ٢٨٨.
-MIN_GAP_SEC = 15 * 60
+# ٦/٩/٢٠٢٦ — قراره: الفاصل ٢٥ دقيقة نهاراً (كان ١٥ فى 1.91 فبلغ حمل جوجل ~٩٢/ساعة
+# مقابل الآمن المُثبَت ٤٠)، وليلاً من ٨ مساءً إلى ٥ صباحاً بتوقيت القاهرة جولة كل
+# ساعة. الساعة بتوقيت القاهرة الحقيقى (zoneinfo) لا بإزاحة ثابتة — التوقيت
+# الصيفى يتبدّل فى أكتوبر وأبريل.
+DAY_GAP_SEC = 25 * 60
+NIGHT_GAP_SEC = 60 * 60
+NIGHT_FROM_H, NIGHT_TO_H = 20, 5   # [20:00, 05:00) بتوقيت القاهرة
+def cairo_hour(ts):
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(ts, ZoneInfo("Africa/Cairo")).hour
+    except Exception:
+        return datetime.fromtimestamp(ts, timezone.utc).hour + 3   # احتياط تقريبى
+def is_night(ts):
+    h = cairo_hour(ts) % 24
+    return h >= NIGHT_FROM_H or h < NIGHT_TO_H
+def gap_sec(ts): return NIGHT_GAP_SEC if is_night(ts) else DAY_GAP_SEC
+MIN_GAP_SEC = DAY_GAP_SEC   # للتوافق مع الاختبارات والحارس؛ القرار الفعلى فى gap_sec()
 REQ_MAX_AGE_SEC = 20 * 60
 
 def should_run(job):
@@ -418,8 +435,9 @@ def should_run(job):
     except Exception: served = 0.0
     fresh_req = req_at > served and (now - req_at) <= REQ_MAX_AGE_SEC
     if fresh_req: return True, "طلب يدوى", req.get("at")
-    if gap >= MIN_GAP_SEC: return True, "الدورة المجدولة (%.0f دقيقة)" % (gap / 60), None
-    return False, "تخطٍّ — آخر جمع منذ %.0f دقيقة ولا طلب يدوى" % (gap / 60), None
+    need = gap_sec(now)
+    if gap >= need: return True, "الدورة المجدولة (%.0f دقيقة · %s)" % (gap / 60, "ليلى" if need == NIGHT_GAP_SEC else "نهارى"), None
+    return False, "تخطٍّ — آخر جمع منذ %.0f دقيقة من %d ولا طلب يدوى" % (gap / 60, need / 60), None
 
 def sweep_due(job, now):
     try: last = float(job.get("lastSweepAt") or 0)
@@ -443,11 +461,15 @@ def main():
     rel_dict = REL_DICT
     try: cursor = int(job.get("cursor") or 0)
     except Exception: cursor = 0
-    take, next_cursor = rotate(feeds, cursor)
     # عدّاد الدورات محفوظ فى عقدة المهمة (عامل Actions بلا حالة بين الجولات).
     try: round_no = int(job.get("roundNo") or 0) + 1
     except Exception: round_no = 1
     sweep = sweep_due(job, started)
+    # ٦/٩/٢٠٢٦ — طبقتان بقراره: الزوايا الموسومة tier:"slow" فى الإعداد (فريدها
+    # ≤٢ يومياً بالقياس) تُجلب فى المسحة الساعية وحدها بنافذة الأسبوع؛ والسريعة
+    # كل جولة. لا تحذف زاوية — الوسم يتراجع بتعديل كلمة فى الإعداد.
+    pool = feeds if sweep else [f for f in feeds if f.get("tier") != "slow"]
+    take, next_cursor = rotate(pool, cursor)
     days = FETCH_DAYS_SWEEP if sweep else FETCH_DAYS_FAST
     print("النافذة: when:%dd %s (جولة %d)" % (days, "مسحة أسبوعية" if sweep else "جولة يومية", round_no))
     got = fetch_all([feed_url(f["query"], days) for f in take]); errors = []; results = []
@@ -531,8 +553,8 @@ def main():
               "emptyFeeds": len(empty), "emptyFeedNames": empty[:8],
               "feedStatus": status, "merged": True,
               "window": "%dd" % days, "round": round_no, "purgedRetired": purged,
-              "collectionIntervalSec": MIN_GAP_SEC, "sweepIntervalSec": SWEEP_INTERVAL_SEC,
-              "nextCollectionAt": (int(started) + MIN_GAP_SEC) * 1000,
+              "collectionIntervalSec": gap_sec(started), "sweepIntervalSec": SWEEP_INTERVAL_SEC,
+              "nextCollectionAt": (int(started) + gap_sec(started)) * 1000,
               "lastSweepAt": int((started if sweep else float(job.get("lastSweepAt") or 0)) * 1000),
               "runMs": int((time.time() - started) * 1000), "errors": errors[:8], "feedsSrc": src,
               "resolve": resolve_stat}
@@ -563,8 +585,8 @@ def main():
         state, days, ok_feeds, len(take), live_ok, len(feeds), len(merged), time.time() - started)
     try:
         body = {"cursor": next_cursor, "roundNo": round_no,
-                "collectionIntervalSec": MIN_GAP_SEC, "sweepIntervalSec": SWEEP_INTERVAL_SEC,
-                "nextCollectionAt": (int(started) + MIN_GAP_SEC) * 1000,
+                "collectionIntervalSec": gap_sec(started), "sweepIntervalSec": SWEEP_INTERVAL_SEC,
+                "nextCollectionAt": (int(started) + gap_sec(started)) * 1000,
                 "last_run": {"at": int(time.time()), "by": "github-actions",
                                                     "summary": summary, "errors": errors[:6]}}
         if ok: body.update({"last_ok": int(time.time()), "last_err": None, "fail_streak": 0})
