@@ -6,7 +6,7 @@
 و600 إجمالاً، كتابة data/central/news فى Firebase بحارس hash، ونبضة /mwri/jobs.
 لا أسرار: القاعدة تقبل الكتابة داخل /mwri بقواعدها الحالية.
 """
-import hashlib, json, re, sys, time, urllib.parse, urllib.request, concurrent.futures as cf
+import hashlib, json, os, re, sys, time, urllib.parse, urllib.request, concurrent.futures as cf
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -29,6 +29,23 @@ NEWS_DAYS, NEWS_LIMIT, FEED_LIMIT, WAVE, WAVE_GAP, TIMEOUT, RETRIES = 7, 800, 40
 # آلية التناوب تبقى فى الكود: خفض SLICE يعيدها فوراً إن تغيّرت عتبة جوجل.
 SLICE = 60
 SOFT_RETRY_PAUSE = 6.0
+# ٦/٩/٢٠٢٦ — نافذة الاستعلام: كانت when:7d فى كل جولة، وهى **سبب توقف دخول
+# الجديد**. موجز بحث جوجل بنافذة أسبوع يرجع مجموعة مرتَّبة بالصلة لا بالتاريخ،
+# فيثبت على «أفضل الأسبوع» ولا يدخله خبر اليوم. مقيس ٦/٩ بنفس الاستعلام ونفس
+# الرؤوس ونفس المخرج، الفارق النافذة وحدها:
+#   general_ry: أحدث عنصر ١١٫٧ س عند 7d  ←  ٠٫٧ س عند 1d
+#   canals    : ١٢٫٤ س وصفر عنصر <١٢س     ←  ٢٫٩ س وستة عناصر
+#   delta     : ٦٫٢ س وسبعة                ←  ١٫٠ س وسبعة عشر
+# فالجولة العادية صارت 1d (الطزاجة)، وكل SWEEP_EVERY جولة مسحة 7d تلتقط ما
+# تأخّرت فهرسته أو ما لم يظهر فى نافذة اليوم. الأرشيف لا يتأثر: الدمج يحتفظ
+# بالقديم NEWS_DAYS أيام أياً كانت نافذة الجلب.
+FETCH_DAYS_FAST = 1
+FETCH_DAYS_SWEEP = NEWS_DAYS
+SWEEP_EVERY = 6
+# سقف تنزيع الكتل قبل الترتيب الزمنى — حماية من موجز ضخم لا قصّ للأحدث.
+PARSE_MAX = 200
+# تجربة جافة: تقرأ وتجلب ولا تكتب حرفاً فى القاعدة الحية (مسبار قبل الرفع).
+DRY = os.environ.get("COLLECT_DRY") == "1"
 FEED_RE = re.compile(r'\{\s*id:\s*"([^"]+)",\s*name:\s*"([^"]+)",\s*query:\s*(?:\'([^\']*)\'|"([^"]*)")\s*\}')
 GRP_RE = re.compile(r'\{\s*slug:\s*"([^"]+)",\s*nm:\s*"([^"]+)"')
 
@@ -39,6 +56,13 @@ def http(url, method="GET", body=None, headers=None, timeout=TIMEOUT):
     req = urllib.request.Request(url, data=data, method=method, headers=h)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return r.status, r.read().decode("utf-8", "replace")
+
+def write(url, method, body, timeout=30):
+    """كل كتابة فى القاعدة تمرّ من هنا — لتُمنع كلها فى التجربة الجافة."""
+    if DRY:
+        print("  (جافة) %s %s ← %d مفتاحاً" % (method, url.rsplit("/", 1)[-1], len(body or {})))
+        return 0, ""
+    return http(url, method, body, timeout=timeout)
 
 # ===== بوابة الصلة — وضع القياس (٥/٩/٢٠٢٦) =====
 # تسِم ولا تحذف. السبب: البوابة تُسقط عند الإدخال فما تُسقطه لا يعود، فتُشغَّل
@@ -122,16 +146,20 @@ def strip(v): return clean(re.sub(r"<[^>]*>", " ", decode(v)))
 def field(block, name):
     m = re.search(r"<" + name + r"(?:\s[^>]*)?>([\s\S]*?)</" + name + ">", block, re.I)
     return decode(m.group(1)) if m else ""
-def feed_url(q):
+def feed_url(q, days=FETCH_DAYS_FAST):
     # زاوية قيمتها رابط كامل = موجز مباشر تُجلب كما هى (بوابة الوزارة · بينج ·
     # اليوم السابع · موجزات جوجل غير البحثية). مقيس ٣/٩: /search وحده يُخنق.
     q = (q or "").strip()
     if q[:7].lower() == "http://" or q[:8].lower() == "https://": return q
-    return "https://news.google.com/rss/search?q=" + urllib.parse.quote(q + " when:%dd" % NEWS_DAYS, safe="") + "&hl=ar&gl=EG&ceid=EG:ar"
+    return "https://news.google.com/rss/search?q=" + urllib.parse.quote(q + " when:%dd" % days, safe="") + "&hl=ar&gl=EG&ceid=EG:ar"
 
 def parse_rss(xml, feed):
+    # ٦/٩/٢٠٢٦ — القصّ عند FEED_LIMIT كان يتم على **ترتيب الموجز** قبل التنزيع،
+    # وموجز البحث غير مرتَّب زمنياً (مقيس: official يرجع ٨٤ عنصراً بترتيب غير
+    # تنازلى)، فكان أحدث خبر قد يقع خارج الأربعين ويضيع. الآن: تنزيع الكل ثم
+    # ترتيب تنازلى بالتاريخ ثم قصّ — فالمقصوص هو الأقدم دائماً.
     out = []
-    for part in re.split(r"<item>", xml, flags=re.I)[1:FEED_LIMIT + 1]:
+    for part in re.split(r"<item>", xml, flags=re.I)[1:PARSE_MAX + 1]:
         block = re.split(r"</item>", part, flags=re.I)[0]
         title = strip(field(block, "title")); url = clean(field(block, "link"))
         ext = clean(field(block, "guid")) or url or (feed["id"] + "|" + title)
@@ -148,7 +176,8 @@ def parse_rss(xml, feed):
                "feedId": feed["id"], "feedName": feed["name"]}
         # externalId محذوف: ٣٩٢ بايت/عنصر بلا استعمال (التفريد بالرابط والعنوان)
         out.append(row)
-    return out
+    out.sort(key=lambda r: r["publishedAt"], reverse=True)
+    return out[:FEED_LIMIT]
 
 def fetch_one(url):
     try:
@@ -379,13 +408,23 @@ def main():
     job = read_json(JOB_URL, timeout=20) or {}
     run, why, served_req = should_run(job)
     print("بوابة:", why)
+    # تجاوز البوابة مسموح للمسبار وحده وفى التجربة الجافة فقط — فلا يمكن
+    # استعماله لإشعال جولات حقيقية متلاحقة على جوجل.
+    if not run and DRY and os.environ.get("COLLECT_FORCE") == "1":
+        run, served_req = True, None; print("بوابة: تجاوز (تجربة جافة)")
     if not run:
         sys.exit(0)
     feeds, src = load_feeds()
     try: cursor = int(job.get("cursor") or 0)
     except Exception: cursor = 0
     take, next_cursor = rotate(feeds, cursor)
-    got = fetch_all([feed_url(f["query"]) for f in take]); errors = []; results = []
+    # عدّاد الدورات محفوظ فى عقدة المهمة (عامل Actions بلا حالة بين الجولات).
+    try: round_no = int(job.get("roundNo") or 0) + 1
+    except Exception: round_no = 1
+    sweep = (round_no % SWEEP_EVERY == 0)
+    days = FETCH_DAYS_SWEEP if sweep else FETCH_DAYS_FAST
+    print("النافذة: when:%dd %s (جولة %d)" % (days, "مسحة أسبوعية" if sweep else "جولة يومية", round_no))
+    got = fetch_all([feed_url(f["query"], days) for f in take]); errors = []; results = []
     for f, g in zip(take, got):
         why = ""
         if g and g["ok"]:
@@ -405,13 +444,22 @@ def main():
     # الدمج هو الوضع الطبيعى الآن (الجولة تسأل شريحة لا كل الزوايا):
     # الجديد يغلب، والقديم يبقى داخل نافذة ٧ أيام.
     cutoff = (datetime.now(timezone.utc).timestamp() - NEWS_DAYS * 86400) * 1000
-    old_items = []
+    # ٦/٩/٢٠٢٦ — كنس بقايا الزوايا المتقاعدة: بعد تقاعد ١٦ زاوية (٥/٩) ظلّت
+    # عناصرها محمولة فى الدمج حتى تبلغ سبعة أيام، فكانت ~٢٥٠ عنصراً عمرها
+    # ٣٢–٤٢ ساعة تحتل نصف الشاشة وتُظهر التطبيق واقفاً. الحارس: لا يُكنس شىء
+    # إلا إذا حُمّلت قائمة زوايا كاملة (≥٢٠) — قائمة ناقصة كانت ستمحو الأرشيف.
+    active_ids = set(f["id"] for f in feeds)
+    purge_ok = len(feeds) >= 20
+    old_items = []; purged = 0
     for r in ((cur or {}).get("items") or []):
         if not isinstance(r, dict) or not r.get("publishedAt"): continue
+        fid = r.get("feedId")
+        if purge_ok and fid and fid not in active_ids: purged += 1; continue
         try:
             if datetime.fromisoformat(r["publishedAt"].replace("Z", "+00:00")).timestamp() * 1000 >= cutoff:
                 old_items.append(r)
         except Exception: continue
+    if purged: print("كُنس %d عنصراً من زوايا متقاعدة" % purged)
     merged = dedupe(fresh + old_items)
     # الحلّ **بعد** الدمج والقصّ لا قبله — مقيس ٥/٩: الحلّ قبل الدمج أنفق
     # الميزانية على ٢٩٠ صفاً طازجاً أقدم من حدّ الـ٨٠٠ فسقطت بعد حلّها، وبقى
@@ -443,6 +491,7 @@ def main():
               "failedFeeds": len(feeds) - live_ok,
               "emptyFeeds": len(empty), "emptyFeedNames": empty[:8],
               "feedStatus": status, "merged": True,
+              "window": "%dd" % days, "round": round_no, "purgedRetired": purged,
               "runMs": int((time.time() - started) * 1000), "errors": errors[:8], "feedsSrc": src,
               "resolve": resolve_stat}
     print("شريحة %d/%d (مؤشر %d→%d) · جديد %d · مدموج %d · %s · %.1fث"
@@ -456,35 +505,36 @@ def main():
         # لا شىء جديد وصل: تُحدَّث checkedAt والحالة فقط، ويبقى at كما هو.
         # كتابة at جديداً هنا تجعل لقطةً قديمة تبدو «جُمعت الآن» فى التطبيق —
         # وهو الفشل الصامت نفسه فى ثوب الحداثة.
-        http(NEWS_URL, "PATCH", {"checkedAt": now, "health": health,
+        write(NEWS_URL, "PATCH", {"checkedAt": now, "health": health,
                                  "lastError": (errors or ["لا عناصر جديدة"])[0]}, timeout=30)
         state = "kept(%d)" % len(merged)
     elif cur and cur.get("contentHash") == h and cur.get("items"):
-        http(NEWS_URL, "PATCH", dict(stamp, count=len(merged)), timeout=30); state = "unchanged"
+        write(NEWS_URL, "PATCH", dict(stamp, count=len(merged)), timeout=30); state = "unchanged"
     else:
-        http(NEWS_URL, "PUT", dict(stamp, schema=1, contentHash=h, count=len(merged),
+        write(NEWS_URL, "PUT", dict(stamp, schema=1, contentHash=h, count=len(merged),
                                    n=len(merged), items=merged), timeout=60)
         state = "stored(%d+%d→%d)" % (len(fresh), len(old_items), len(merged))
 
     # النجاح = الشريحة أنتجت. زاوية مخنوقة فى جولة تعود فى جولتها التالية.
     ok = ok_feeds > 0 and bool(merged)
-    summary = "%s · شريحة %d/%d · زوايا حية %d/%d · عناصر %d · %.0fث" % (
-        state, ok_feeds, len(take), live_ok, len(feeds), len(merged), time.time() - started)
+    summary = "%s · نافذة %dd · شريحة %d/%d · زوايا حية %d/%d · عناصر %d · %.0fث" % (
+        state, days, ok_feeds, len(take), live_ok, len(feeds), len(merged), time.time() - started)
     try:
-        body = {"cursor": next_cursor, "last_run": {"at": int(time.time()), "by": "github-actions",
+        body = {"cursor": next_cursor, "roundNo": round_no,
+                "last_run": {"at": int(time.time()), "by": "github-actions",
                                                     "summary": summary, "errors": errors[:6]}}
         if ok: body.update({"last_ok": int(time.time()), "last_err": None, "fail_streak": 0})
         else: body.update({"last_err": (errors or ["?"])[0][:200],
                            "fail_streak": int(job.get("fail_streak") or 0) + 1})
-        http(JOB_URL, "PATCH", body, timeout=20)
+        write(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
-    try: http(JOB_URL, "PATCH", {"relevanceProbe": rel_probe})
+    try: write(JOB_URL, "PATCH", {"relevanceProbe": rel_probe})
     except Exception as e: print("relevanceProbe:", e)
     if served_req:
         # http() يُسلسل الجسم بنفسه — يُمرَّر dict لا bytes. (تعارض توقيع
         # دوال: التمرير المُسلسَل مسبقاً رفعه "Object of type bytes is not
         # JSON serializable" فمرّ الرفع وفشل التسجيل صامتاً فى أول جولة.)
-        try: http(JOB_URL, "PATCH", {"refreshServedAt": served_req})
+        try: write(JOB_URL, "PATCH", {"refreshServedAt": served_req})
         except Exception as e: print("refreshServedAt:", e)
     print("state:", state)
     sys.exit(0 if ok else 1)
