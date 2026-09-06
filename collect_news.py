@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime
 RTDB = "https://ismailia-64500-default-rtdb.europe-west1.firebasedatabase.app"
 NEWS_URL = RTDB + "/mwri/apps/irrigation-social-monitor/data/central/news.json"
 JOB_URL = RTDB + "/mwri/jobs/news-central.json"
-SOURCES_URL = "https://mohseno2002.github.io/irrigation-social-monitor/sources-config.js"
+SOURCES_URL = os.environ.get("COLLECT_SOURCES_URL") or "https://mohseno2002.github.io/irrigation-social-monitor/sources-config.js"  # التجاوز للمسبار وحده
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36 MWRI-NewsCollector/1.0"
 NEWS_DAYS, NEWS_LIMIT, FEED_LIMIT, WAVE, WAVE_GAP, TIMEOUT, RETRIES = 7, 800, 40, 4, 1.5, 15, 2
 # SLICE: عدد الزوايا لكل جولة. الحدّ الخطر مقيس ٣/٩: ~٢٨٠٠ طلب/يوم من مخرج
@@ -76,51 +76,55 @@ def write(url, method, body, timeout=30):
 #      و«السد» من «تسديد»، والمطابقة الجزئية رفعت الدقة كذباً من ٤٣٪ إلى ٧٩٪.
 #   ٢) النفى يسقط أمام الدليل المهنى القوى — «ضبط» و«إزالة» كلمات حوادث،
 #      وهما صميم العمل فى «ضبط نهر النيل» و«إزالة تعديات».
-REL_THRESHOLD = 3
-TASHKEEL = re.compile(r"[\u0617-\u061A\u064B-\u0652\u0640]")
-def norm(t):
-    t = TASHKEEL.sub("", t or "")
-    t = t.replace("أ","ا").replace("إ","ا").replace("آ","ا").replace("ة","ه").replace("ى","ي").replace("ؤ","و").replace("ئ","ي")
-    return t
-PREFIX = ("وبال","فبال","بال","وال","فال","كال","لل","ال","و","ف","ب","ل","ك")
-def stem(w):
-    for p in PREFIX:
-        if w.startswith(p) and len(w) - len(p) >= 3: return w[len(p):]
-    return w
-def toks(t):
-    return set(stem(w) for w in re.findall(r"[\u0621-\u064A]+", norm(t)))
+# ٦/٩/٢٠٢٦ — بوابة الصلة تعمل بالحذف، وبقاموس التطبيق نفسه لا بقاموس مستقل.
+# القياس الذى حسم الشكل: بوابة القياس القديمة (score/CORE) كانت ستُسقط ٣٦ خبراً
+# يقبلها التطبيق — منها بيان الوزارة عن الوفد الصينى و«السد العالى» — لأن
+# قوائمها كانت بـ«ال» بينما المُقطِّع ينزعها فلا تتطابق أبداً. فبدل قاموسين
+# يختلفان: القاموس واحد فى sources-config.js (MWRI_SOURCES.relevance) يقرأه
+# التطبيق والمجمّع، والقواعد هنا نقلٌ حرفى لدالة relevant() فى التطبيق —
+# مُثبَت بمسبار تطابق ٧٩٠/٧٩٠ على اللقطة الحية. الأثر: ما يصل للجهاز هو ما
+# كان سيُعرض فعلاً، والحجم يهبط بقدر الضجيج المحذوف.
+REL_DICT_RE = re.compile(r"var relevanceDict\s*=\s*(\{[\s\S]*?\});")
+def load_relevance(js):
+    try:
+        m = REL_DICT_RE.search(js)
+        d = json.loads(m.group(1))
+        for k in ("strong", "offScope", "bank", "waterIssue", "agri"):
+            if not isinstance(d.get(k), list) or not d[k]: raise ValueError("relevance." + k)
+        return d
+    except Exception as e:
+        print("قاموس الصلة غير متاح — البوابة معطَّلة هذه الجولة:", e); return None
 
-CORE = set(norm(x) for x in """ترعه ترع مصرف مصارف مسقي مساقي رياح رياحات قناطر قناطر حبس اهوسه هويس
-منسوب مناسيب تصرف تصرفات تطهير تبطين تعديات تعدي حرم زمام مقنن ري ريه سقايه
-غمر تنقيط رشاش صرف مغطي بواره بوابه بوابات هدار سد سدود خزان بحيره فيضان جفاف عطش
-مزارعين فلاحين اراضي زراعيه محصول محاصيل ابار بئر جوفيه تحليه معالجه تلوث
-نيل رافد فرع مجري مجاري ميه مياه شرب انهار نهر جسر جسور طلمبات طلمبه محطه رفع
-نهضه اثيوبيا اثيوبي حلفا ناصر توشكي الروصيرص دنقلا حصه حصص مفاوضات اسنا نجع حمادي اسيوط ديروط
-مواسير ماسوره حقليات حقلي ضخ شبكه شبكات خط خطوط وصله محبس محابس طلمبه صيانه كسر انقطاع
-تكريك حفر تعليه دبش خرسانه منشات منشا كوبري معديه سحاره سيفون ترسيب مرشح""".split())
-# ٥/٩/٢٠٢٦ — بعد قياس الجولة الحية: أربعة من خمسة مرفوضات فى العيّنة كانت
-# أخباراً عن وزير الرى ومواسير الصرف. فالوزارة والوزير انتقلا من دليل مساعد
-# إلى دليل أساسى (خبر عن وزير الرى يخصّ العمل بحكم التعريف)، ودخلت مفردات
-# التشغيل اليومى الناقصة: مواسير · حقليات · ضخ · شبكات · محبس · تكريك.
-CORE |= set(norm(x) for x in """وزاره وزير سويلم الري الرى""".split())
-BOOST = set(norm(x) for x in """الموارد المائيه مصلحه هيئه محافظه مديريه اداره
-الجيزه القاهره الاسماعيليه الشرقيه الدقهليه البحيره المنوفيه الفيوم بني سويف المنيا اسيوط سوهاج قنا اسوان الاقصر""".split())
-VETO = set(norm(x) for x in """قتل مقتل جريمه جثه سرقه لص متهم متهمين تشكيل عصابي مخدرات
-حريق اطفاء تصادم انقلاب سياره سيارات مرور دهس مباراه كوره لاعب هدف فنان فنانه اغنيه مسلسل فيلم
-بورصه اسهم عملات ذهب دولار حج عمره قرعه رياضه منتخب""".split())
-
-def score(title, summary=""):
-    tk = toks((title or "") + " " + (summary or ""))
-    core = len(tk & CORE); boost = len(tk & BOOST); veto = len(tk & VETO)
-    # النفى يُلغى إذا كان الدليل المهنى قوياً: خبران مثل «ضبط نهر النيل» و
-    # «إزالة تعديات» يحملان كلمات تبدو حوادثية وهما صميم العمل. مقيس على
-    # لقطة ٨٠٠ عنصر: بلا هذا الشرط سقط خبر إزالة ١٠٢٤ تعدياً وهو أهم ما ورد.
-    pen = 0 if core >= 2 else veto * 3
-    return core * 2 + min(boost, 2) - pen, core, boost, veto
+def norm_ar(v):
+    return re.sub(r"[\u064B-\u065F\u0670\u0640]", "", clean(v)).replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ٱ", "ا").replace("ى", "ي")
+WORD_CH = re.compile(r"[\u0600-\u06FF0-9\u0660-\u0669]")
+def phrase_hit(text, phrase):
+    t = norm_ar(text); p = norm_ar(phrase)
+    if not p: return False
+    at = t.find(p)
+    while at >= 0:
+        before = t[at - 1] if at > 0 else ""
+        after = t[at + len(p)] if at + len(p) < len(t) else ""
+        if not (before and WORD_CH.match(before)) and not (after and WORD_CH.match(after)): return True
+        at = t.find(p, at + 1)
+    return False
+def any_of(text, words): return any(w and w in text for w in words)
+BANK_ABUDHABI = re.compile(r"مصرف\s+ا?بو\s*ظبي(?:\s+الاسلامي)?")
+def relevant(text, d):
+    """نقل حرفى لدالة relevant() فى index.html (بيلد 1.94)."""
+    t = clean(text)
+    if any_of(t, d["offScope"]): return False
+    for w in d["strong"]:
+        if phrase_hit(t, w): return True
+    drain = BANK_ABUDHABI.sub(" ", norm_ar(t))
+    if phrase_hit(drain, "مصرف") and not any_of(t, d["bank"]): return True
+    return any_of(t, d["waterIssue"]) and any_of(t, d["agri"])
+def gate_text(r): return clean(r.get("title"))[:190] + " " + clean(r.get("summary"))[:420]
 
 def load_feeds():
     try:
         _, js = http(SOURCES_URL, timeout=15)
+        full_js = js
         # ٥/٩/٢٠٢٦ — قصّ الملف عند قائمة المتقاعدين قبل التنزيع. التنزيع هنا
         # بتعبير نمطى على الملف كله لا بقراءة الكائن المُصدَّر، فإخراج زاوية
         # من centralFeeds وحده لا يوقفها: مقيس اليوم — بعد تقاعد ١٦ زاوية ظل
@@ -128,7 +132,7 @@ def load_feeds():
         js = js.split("var retiredFeeds")[0]
         feeds = [{"id": m[0], "name": m[1], "query": m[2] if m[2] else m[3]} for m in FEED_RE.findall(js)]
         # priorityGroups للعرض فقط؛ لا تُعاد إلى زوايا الجمع المتقاعدة.
-        if len(feeds) >= 10: return feeds, "sources-config.js"
+        if len(feeds) >= 10: return feeds, "sources-config.js", load_relevance(full_js)
         raise RuntimeError("parsed %d" % len(feeds))
     except Exception as e:
         print("sources-config.js غير متاح:", e); sys.exit(2)
@@ -318,6 +322,13 @@ def resolve_rows(rows, budget=RESOLVE_BUDGET, deadline_sec=RESOLVE_DEADLINE_SEC)
 def norm_title(v):
     s = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", clean(v)); s = re.sub(r"[أإآٱ]", "ا", s).replace("ى", "ي")
     return re.sub(r"[^\u0600-\u06FFA-Za-z0-9]+", " ", s).strip().lower()
+def story_key(v):
+    """٦/٩/٢٠٢٦ — مفتاح القصة (مطابق لـstoryKey فى التطبيق): أول ثمانى كلمات من
+       العنوان بعد نزع ذيل المصدر. الخبر الواحد كان يعود من زاويتين بذيلين
+       مختلفين فيمرّ من التفريد بالعنوان الكامل (مقيس: العقال البحرى ×٣)."""
+    head = re.split(r"\s+[-\u2013\u2014|]\s+", clean(v))[0]
+    w = [x for x in norm_title(head).split(" ") if len(x) > 1]
+    return " ".join(w[:8]) if len(w) >= 4 else ""
 def dedupe(rows):
     # الرابط المحلول يغلب المبهم عند تساوى العنوان — مقيس ٥/٩: الخبر الواحد
     # يعود من زاويتين بطابعَى نشر مختلفين، فكان الأحدث (المبهم) يطرد نسخته
@@ -327,15 +338,16 @@ def dedupe(rows):
         u = clean(r.get("url") or "")
         if u and GNEWS_ART not in u: best.setdefault(norm_title(r["title"])[:120], (u, r.get("sourceName") or ""))
     rows.sort(key=lambda r: r["publishedAt"], reverse=True)
-    seen_u, seen_t, out = set(), set(), []
+    seen_u, seen_t, seen_s, out = set(), set(), set(), []
     for r in rows:
         tk = norm_title(r["title"])[:120]
         if GNEWS_ART in (r.get("url") or "") and tk in best:
             r["url"] = best[tk][0]
             if best[tk][1]: r["sourceName"] = best[tk][1]
-        uk = clean(r["url"])
-        if (uk and uk in seen_u) or tk in seen_t: continue
+        uk = clean(r["url"]); sk = story_key(r["title"])
+        if (uk and uk in seen_u) or tk in seen_t or (sk and sk in seen_s): continue
         if uk: seen_u.add(uk)
+        if sk: seen_s.add(sk)
         seen_t.add(tk); out.append(r)
         if len(out) >= NEWS_LIMIT: break
     return out
@@ -360,7 +372,7 @@ def rotate(feeds, cursor):
     take = [goog[(cursor + k) % n] for k in range(SLICE)]
     return direct + take, (cursor + SLICE) % n
 
-def merge_status(prev, results, now):
+def merge_status(prev, results, now, active_ids=None):
     """حالة الزوايا تراكمية: الشريحة الحالية تُحدَّث، وغيرها تحتفظ بآخر
        نتيجة معروفة مع عمرها — وإلا بدت ١٩ زاوية «فارغة» وهى لم تُسأل أصلاً."""
     by_id = {}
@@ -370,6 +382,9 @@ def merge_status(prev, results, now):
         by_id[f["id"]] = {"id": f["id"], "name": f["name"], "count": len(it),
                           "state": "ok" if it else "empty", "at": now,
                           "why": ("" if it else (why or "بلا نتائج"))}
+    # ٦/٩/٢٠٢٦ — الزاوية التى خرجت من الإعداد تُكنس من الحالة أيضاً (كان الجروبان
+    # يظهران «فارغين» بعد ٢٤ ساعة من تقاعدهما).
+    if active_ids: by_id = {k: v for k, v in by_id.items() if k in active_ids}
     for r in by_id.values():
         if r.get("at"): r["ageMin"] = int((now - r["at"]) / 60000)
     return list(by_id.values())
@@ -419,7 +434,7 @@ def main():
         sys.exit(0)
     # طابع البداية يمنع إعادة المحاولة المتلاحقة إذا فشلت الجولة أو تبدّل العامل.
     write(JOB_URL, "PATCH", {"lastAttemptAt": int(started)}, timeout=20)
-    feeds, src = load_feeds()
+    feeds, src, rel_dict = load_feeds()
     try: cursor = int(job.get("cursor") or 0)
     except Exception: cursor = 0
     take, next_cursor = rotate(feeds, cursor)
@@ -430,11 +445,19 @@ def main():
     days = FETCH_DAYS_SWEEP if sweep else FETCH_DAYS_FAST
     print("النافذة: when:%dd %s (جولة %d)" % (days, "مسحة أسبوعية" if sweep else "جولة يومية", round_no))
     got = fetch_all([feed_url(f["query"], days) for f in take]); errors = []; results = []
+    # ٦/٩/٢٠٢٦ — «موجز فارغ» بنافذة يوم واحد حالة طبيعية لزاوية ضيقة (الشكاوى ·
+    # روابط المستخدمين تفرغان أغلب الأيام)، وكانت تُحسب فشلاً كل جولة وتحمل
+    # نصّ ردّ جوجل الخام. الخنق الناعم الحقيقى يظهر جماعياً: فإن فرغت ≥٥ زوايا
+    # فى جولة واحدة عُدّت أخطاء بسببها، وإلا فحالة «فارغة» بلا خطأ.
+    soft_n = sum(1 for g in got if g and not g["ok"] and g.get("soft"))
+    mass_empty = soft_n >= 5
     for f, g in zip(take, got):
         why = ""
         if g and g["ok"]:
             items = parse_rss(g["body"], f)
             if not items: why = "موجز بلا عناصر صالحة"
+        elif g and g.get("soft") and days == FETCH_DAYS_FAST and not mass_empty:
+            items = []; why = "بلا نتائج خلال ٢٤ ساعة"
         else:
             items = []; why = (g or {}).get("why", "?")
             errors.append(f["name"] + ": " + why)
@@ -473,22 +496,27 @@ def main():
     # المبهمة لخبر محلول سابقاً ترث رابطه داخل dedupe بمفتاح العنوان.
     # محاكاة ٤ جولات على اللقطة الحية: مبهم ٦٧٩ ← ٤٢٨ ← ١٧٨ ← ٤١ (الـ٤١ مبتورة
     # قديمة موسومة rf) · صفر فشل · الحجم ٨٤٣ ← ٧٣٢ ك.ب.
+    # البوابة قبل الحلّ: ميزانية حلّ الروابط لا تُنفق على ضجيج سيُحذف.
+    gate = {"at": int(time.time() * 1000), "mode": "off", "total": len(merged), "kept": len(merged), "dropped": 0, "dropSample": []}
+    if rel_dict:
+        keep = [r for r in merged if relevant(gate_text(r), rel_dict)]
+        dropped = [r for r in merged if not relevant(gate_text(r), rel_dict)]
+        # صمام أمان: تعديل خاطئ فى القاموس لا يمحو اللقطة — لو أسقطت البوابة أكثر
+        # من ٩٥٪ من ≥١٠٠ عنصر تتعطّل هذه الجولة وتُعلن السبب، ولا يُحذف شىء.
+        if len(merged) >= 100 and len(keep) < 0.05 * len(merged):
+            gate.update({"mode": "off", "why": "البوابة أسقطت %d من %d — عُطّلت احتياطاً" % (len(dropped), len(merged))})
+            print("بوابة الصلة: تعطيل احتياطى —", gate["why"])
+        else:
+            merged = keep
+            gate.update({"mode": "drop", "kept": len(keep), "dropped": len(dropped),
+                         "dropSample": [r.get("title", "")[:90] for r in dropped[:5]]})
+            print("بوابة الصلة: يبقى %d من %d (%.0f%%) · حُذف %d" % (len(keep), gate["total"], 100.0 * len(keep) / max(gate["total"], 1), len(dropped)))
     r_done, r_fail, r_wait = resolve_rows(merged)
     named = unwrap_cheap(merged)
     if r_done or named: merged = dedupe(merged)
     resolve_stat = {"done": r_done, "fail": r_fail, "waiting": r_wait, "named": named}
     print("حلّ الروابط: %d حُلّ · %d فشل · %d بالانتظار" % (r_done, r_fail, resolve_stat["waiting"]))
-    # وضع القياس: نحسب ما كانت البوابة سترفضه ولا نحذف شيئاً.
-    rel_scores = [score(r.get("title"), r.get("summary"))[0] for r in merged]
-    rel_keep = sum(1 for v in rel_scores if v >= REL_THRESHOLD)
-    rel_sample = [r.get("title", "")[:90] for r, v in zip(merged, rel_scores) if v < REL_THRESHOLD][:5]
-    rel_probe = {"at": int(time.time() * 1000), "threshold": REL_THRESHOLD,
-                 "total": len(merged), "wouldKeep": rel_keep,
-                 "wouldDrop": len(merged) - rel_keep, "mode": "measure",
-                 "dropSample": rel_sample}
-    print("بوابة الصلة (قياس فقط): يبقى %d من %d (%.0f%%) · يُرفض %d"
-          % (rel_keep, len(merged), 100.0 * rel_keep / max(len(merged), 1), len(merged) - rel_keep))
-    status = merge_status(prev_status, results, now)
+    status = merge_status(prev_status, results, now, active_ids if purge_ok else None)
     live_ok = sum(1 for r in status if r.get("state") == "ok")
     health = {"state": "ok" if ok_feeds >= (len(take) + 1) // 2 and len(merged) >= 10 else "degraded",
               "successfulFeeds": live_ok, "totalFeeds": len(feeds),
@@ -539,7 +567,7 @@ def main():
         if sweep: body["lastSweepAt"] = int(started)
         write(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
-    try: write(JOB_URL, "PATCH", {"relevanceProbe": rel_probe})
+    try: write(JOB_URL, "PATCH", {"relevanceGate": gate})
     except Exception as e: print("relevanceProbe:", e)
     if served_req:
         # http() يُسلسل الجسم بنفسه — يُمرَّر dict لا bytes. (تعارض توقيع
