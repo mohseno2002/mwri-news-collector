@@ -1,5 +1,12 @@
 name: news-collector
 on:
+  push:
+    branches: [main]
+    paths:
+      - "collect_news.py"
+      - "watch_loop.py"
+      - "test_schedule.py"
+      - ".github/workflows/collect.yml"
   schedule:
     # ٥/٩/٢٠٢٦ — الجدولة هنا **مُعيد إشعال** لا ساعة: قياس اليوم أثبت أن
     # `*/5` أطلقت ثلاث مرات فى ١٢ ساعة (٠١:٠١ · ٠٥:٤٨ · ١١:١٦ UTC)، فالطلب
@@ -11,8 +18,8 @@ on:
     # مجموعة concurrency: جولة واحدة تعمل + واحدة بالانتظار على الأكثر،
     # وأى انتظار أقدم يُلغى تلقائياً — فلا سلسلتان أبداً.
     # الحمل على جوجل لم يتغيّر: collect_news.py يقرّر الجمع بنفس البوابة
-    # (٢٥ دقيقة أو طلب يدوى)؛ الذى تغيّر أن البوابة تُسأل كل ٢٠ ث لا كل بضع
-    # ساعات. الحارس يقرأ ثلاثة أوراق صغيرة من العقدة لا العقدة كلها.
+    # (١٥ دقيقة أو طلب يدوى)؛ الذى تغيّر أن البوابة تُسأل كل ٢٠ ث لا كل بضع
+    # ساعات. الحارس يقرأ أوراقاً صغيرة من العقدة لا العقدة كلها.
     - cron: "*/15 * * * *"
   workflow_dispatch:
 concurrency:
@@ -30,13 +37,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: watch (~25 min) and collect when due
+      - name: Validate collection schedule and merge contracts
+        id: contracts
+        run: python3 -m unittest -v test_schedule.py
+      - name: watch (~25 min) and collect every 15 min when due
         env:
           WATCH_RUN_SEC: "1500"
           WATCH_POLL_SEC: "20"
         run: python3 watch_loop.py
       - name: chain next round
-        if: always()
+        if: always() && steps.contracts.outcome == 'success'
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run collect.yml --ref "${GITHUB_REF_NAME:-main}" --repo "$GITHUB_REPOSITORY"

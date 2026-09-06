@@ -36,12 +36,12 @@ SOFT_RETRY_PAUSE = 6.0
 #   general_ry: أحدث عنصر ١١٫٧ س عند 7d  ←  ٠٫٧ س عند 1d
 #   canals    : ١٢٫٤ س وصفر عنصر <١٢س     ←  ٢٫٩ س وستة عناصر
 #   delta     : ٦٫٢ س وسبعة                ←  ١٫٠ س وسبعة عشر
-# فالجولة العادية صارت 1d (الطزاجة)، وكل SWEEP_EVERY جولة مسحة 7d تلتقط ما
+# فالجولة العادية صارت 1d (الطزاجة)، وكل ساعة مسحة 7d تلتقط ما
 # تأخّرت فهرسته أو ما لم يظهر فى نافذة اليوم. الأرشيف لا يتأثر: الدمج يحتفظ
 # بالقديم NEWS_DAYS أيام أياً كانت نافذة الجلب.
 FETCH_DAYS_FAST = 1
 FETCH_DAYS_SWEEP = NEWS_DAYS
-SWEEP_EVERY = 6
+SWEEP_INTERVAL_SEC = 60 * 60
 # سقف تنزيع الكتل قبل الترتيب الزمنى — حماية من موجز ضخم لا قصّ للأحدث.
 PARSE_MAX = 200
 # تجربة جافة: تقرأ وتجلب ولا تكتب حرفاً فى القاعدة الحية (مسبار قبل الرفع).
@@ -127,9 +127,7 @@ def load_feeds():
         # المجمّع يحمّل ٤٢ زاوية بدل ٢٦ لأنه التقط قائمة المتقاعدين أيضاً.
         js = js.split("var retiredFeeds")[0]
         feeds = [{"id": m[0], "name": m[1], "query": m[2] if m[2] else m[3]} for m in FEED_RE.findall(js)]
-        for slug, nm in GRP_RE.findall(js):
-            feeds.append({"id": "fbgrp_" + slug, "name": nm,
-                          "query": '("مياه الري" OR "نقص مياه" OR "ترعة" OR "مصرف" OR "تطهير" OR "مزارعين") site:facebook.com/groups/' + slug})
+        # priorityGroups للعرض فقط؛ لا تُعاد إلى زوايا الجمع المتقاعدة.
         if len(feeds) >= 10: return feeds, "sources-config.js"
         raise RuntimeError("parsed %d" % len(feeds))
     except Exception as e:
@@ -383,13 +381,13 @@ def merge_status(prev, results, now):
 # فوراً إلا إذا مرّ MIN_GAP_SEC على آخر جمع أو وُجد طلب يدوى لم يُخدَم بعد.
 # الجولة المتخطّاة تنتهى فى ثوانٍ ولا تلمس جوجل ولا تكتب اللقطة، فالحمل
 # اليومى على جوجل لا يتغيّر: ~٤٨ جولة فعلية لا ٢٨٨.
-MIN_GAP_SEC = 25 * 60
+MIN_GAP_SEC = 15 * 60
 REQ_MAX_AGE_SEC = 20 * 60
 
 def should_run(job):
     """قرار التشغيل: (يعمل؟, السبب, طابع الطلب المخدوم)."""
     now = time.time()
-    try: last = float(job.get("last_ok") or 0)
+    try: last = float(job.get("lastAttemptAt") or job.get("last_ok") or 0)
     except Exception: last = 0.0
     gap = now - last
     req = (job.get("refreshReq") or {})
@@ -403,6 +401,11 @@ def should_run(job):
     if gap >= MIN_GAP_SEC: return True, "الدورة المجدولة (%.0f دقيقة)" % (gap / 60), None
     return False, "تخطٍّ — آخر جمع منذ %.0f دقيقة ولا طلب يدوى" % (gap / 60), None
 
+def sweep_due(job, now):
+    try: last = float(job.get("lastSweepAt") or 0)
+    except (TypeError, ValueError): last = 0
+    return last <= 0 or now - last >= SWEEP_INTERVAL_SEC
+
 def main():
     started = time.time()
     job = read_json(JOB_URL, timeout=20) or {}
@@ -414,6 +417,8 @@ def main():
         run, served_req = True, None; print("بوابة: تجاوز (تجربة جافة)")
     if not run:
         sys.exit(0)
+    # طابع البداية يمنع إعادة المحاولة المتلاحقة إذا فشلت الجولة أو تبدّل العامل.
+    write(JOB_URL, "PATCH", {"lastAttemptAt": int(started)}, timeout=20)
     feeds, src = load_feeds()
     try: cursor = int(job.get("cursor") or 0)
     except Exception: cursor = 0
@@ -421,7 +426,7 @@ def main():
     # عدّاد الدورات محفوظ فى عقدة المهمة (عامل Actions بلا حالة بين الجولات).
     try: round_no = int(job.get("roundNo") or 0) + 1
     except Exception: round_no = 1
-    sweep = (round_no % SWEEP_EVERY == 0)
+    sweep = sweep_due(job, started)
     days = FETCH_DAYS_SWEEP if sweep else FETCH_DAYS_FAST
     print("النافذة: when:%dd %s (جولة %d)" % (days, "مسحة أسبوعية" if sweep else "جولة يومية", round_no))
     got = fetch_all([feed_url(f["query"], days) for f in take]); errors = []; results = []
@@ -492,6 +497,9 @@ def main():
               "emptyFeeds": len(empty), "emptyFeedNames": empty[:8],
               "feedStatus": status, "merged": True,
               "window": "%dd" % days, "round": round_no, "purgedRetired": purged,
+              "collectionIntervalSec": MIN_GAP_SEC, "sweepIntervalSec": SWEEP_INTERVAL_SEC,
+              "nextCollectionAt": (int(started) + MIN_GAP_SEC) * 1000,
+              "lastSweepAt": int((started if sweep else float(job.get("lastSweepAt") or 0)) * 1000),
               "runMs": int((time.time() - started) * 1000), "errors": errors[:8], "feedsSrc": src,
               "resolve": resolve_stat}
     print("شريحة %d/%d (مؤشر %d→%d) · جديد %d · مدموج %d · %s · %.1fث"
@@ -521,11 +529,14 @@ def main():
         state, days, ok_feeds, len(take), live_ok, len(feeds), len(merged), time.time() - started)
     try:
         body = {"cursor": next_cursor, "roundNo": round_no,
+                "collectionIntervalSec": MIN_GAP_SEC, "sweepIntervalSec": SWEEP_INTERVAL_SEC,
+                "nextCollectionAt": (int(started) + MIN_GAP_SEC) * 1000,
                 "last_run": {"at": int(time.time()), "by": "github-actions",
                                                     "summary": summary, "errors": errors[:6]}}
         if ok: body.update({"last_ok": int(time.time()), "last_err": None, "fail_streak": 0})
         else: body.update({"last_err": (errors or ["?"])[0][:200],
                            "fail_streak": int(job.get("fail_streak") or 0) + 1})
+        if sweep: body["lastSweepAt"] = int(started)
         write(JOB_URL, "PATCH", body, timeout=20)
     except Exception as e: print("heartbeat:", e)
     try: write(JOB_URL, "PATCH", {"relevanceProbe": rel_probe})

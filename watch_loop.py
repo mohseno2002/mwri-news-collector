@@ -5,7 +5,7 @@
 المشكلة المقيسة: جدولة GitHub (`*/5`) أطلقت ثلاث مرات فقط فى ١٢ ساعة
 (٠١:٠١ · ٠٥:٤٨ · ١١:١٦ UTC) رغم أنها كل خمس دقائق؛ فطلب الزر اليدوى
 (refreshReq) يظل معلّقاً ساعات ثم ينتهى عمره (٢٠ دقيقة) بلا خدمة، والدورة
-المجدولة (٢٥ دقيقة) تصير ساعات. الجدولة عند GitHub «أفضل جهد» وتُسقَط تحت
+المجدولة تصير ساعات. الجدولة عند GitHub «أفضل جهد» وتُسقَط تحت
 الحِمل — وهى ليست ساعة يُعتمد عليها.
 
 الحلّ بلا أى سرّ: الجولة الواحدة تبقى حيّة ~٢٥ دقيقة وتراقب عقدة المهمة
@@ -34,8 +34,9 @@ def leaf(key, timeout=15):
         return json.loads(r.read().decode("utf-8", "replace") or "null")
 
 def read_gate():
-    """القراءات الثلاث الصغيرة التى تحتاجها should_run — لا العقدة كلها."""
-    return {"last_ok": leaf("last_ok"), "refreshReq": leaf("refreshReq"), "refreshServedAt": leaf("refreshServedAt")}
+    """أوراق بوابة الاستحقاق فقط؛ طابع المحاولة بالثوانى حتى عند فشل الجمع."""
+    return {"last_ok": leaf("last_ok"), "lastAttemptAt": leaf("lastAttemptAt"),
+            "refreshReq": leaf("refreshReq"), "refreshServedAt": leaf("refreshServedAt")}
 
 def collect():
     if DRY:
