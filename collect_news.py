@@ -84,6 +84,7 @@ def write(url, method, body, timeout=30):
 # التطبيق والمجمّع، والقواعد هنا نقلٌ حرفى لدالة relevant() فى التطبيق —
 # مُثبَت بمسبار تطابق ٧٩٠/٧٩٠ على اللقطة الحية. الأثر: ما يصل للجهاز هو ما
 # كان سيُعرض فعلاً، والحجم يهبط بقدر الضجيج المحذوف.
+REL_DICT = None   # يُملأ فى load_feeds؛ None = البوابة معطَّلة (تمرير كامل)
 REL_DICT_RE = re.compile(r"var relevanceDict\s*=\s*(\{[\s\S]*?\});")
 def load_relevance(js):
     try:
@@ -132,7 +133,11 @@ def load_feeds():
         js = js.split("var retiredFeeds")[0]
         feeds = [{"id": m[0], "name": m[1], "query": m[2] if m[2] else m[3]} for m in FEED_RE.findall(js)]
         # priorityGroups للعرض فقط؛ لا تُعاد إلى زوايا الجمع المتقاعدة.
-        if len(feeds) >= 10: return feeds, "sources-config.js", load_relevance(full_js)
+        # القاموس يُحمَّل هنا فى متغير الوحدة لا فى قيمة الرجوع — توقيع load_feeds
+        # عقدٌ تعتمد عليه test_schedule.py (تعارض توقيع الدوال: درس مقيَّد فى البنك).
+        global REL_DICT
+        REL_DICT = load_relevance(full_js)
+        if len(feeds) >= 10: return feeds, "sources-config.js"
         raise RuntimeError("parsed %d" % len(feeds))
     except Exception as e:
         print("sources-config.js غير متاح:", e); sys.exit(2)
@@ -434,7 +439,8 @@ def main():
         sys.exit(0)
     # طابع البداية يمنع إعادة المحاولة المتلاحقة إذا فشلت الجولة أو تبدّل العامل.
     write(JOB_URL, "PATCH", {"lastAttemptAt": int(started)}, timeout=20)
-    feeds, src, rel_dict = load_feeds()
+    feeds, src = load_feeds()
+    rel_dict = REL_DICT
     try: cursor = int(job.get("cursor") or 0)
     except Exception: cursor = 0
     take, next_cursor = rotate(feeds, cursor)
