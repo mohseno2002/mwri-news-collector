@@ -110,10 +110,15 @@ def phrase_hit(text, phrase):
         at = t.find(p, at + 1)
     return False
 def any_of(text, words): return any(w and w in text for w in words)
+MINISTRY_LEAD = re.compile(r"^\s*[«\"'“]?(?:الري|الرى)[»\"'”]?\s*[:：]")
 BANK_ABUDHABI = re.compile(r"مصرف\s+ا?بو\s*ظبي(?:\s+الاسلامي)?")
 def relevant(text, d):
     """نقل حرفى لدالة relevant() فى index.html (بيلد 1.94)."""
     t = clean(text)
+    # ٧/٩/٢٠٢٦ — مرساة الوزارة تغلب الاستبعاد (مطابق لـ1.97 فى التطبيق)
+    if MINISTRY_LEAD.match(t): return True
+    for a in d.get("anchor") or []:
+        if phrase_hit(t, a): return True
     if any_of(t, d["offScope"]): return False
     for w in d["strong"]:
         if phrase_hit(t, w): return True
