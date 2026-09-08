@@ -353,6 +353,28 @@ def story_key(v):
     head = re.split(r"\s+[-\u2013\u2014|]\s+", clean(v))[0]
     w = [x for x in norm_title(head).split(" ") if len(x) > 1]
     return " ".join(w[:8]) if len(w) >= 4 else ""
+# ٨/٩/٢٠٢٦ — تنحيف الحمولة المخزَّنة بلا فقد معلومة:
+#   feedName مشتق تماماً من feedId (٢٧ علفاً) وغير مستعمل فى الواجهة إطلاقاً،
+#   centralRaw علم ثابت لكل عنصر، وsummary يُحذف حين يكرّر العنوان.
+# الوركر يعيد الثلاثة عند التقديم (fatItem)، فالعميل لا يرى أى فرق.
+# مقيس على لقطة حية: ٤٣٤ ك.ب -> ٣٧٠ ك.ب لنفس ٥٠٧ عناصر.
+def slim_row(r):
+    if not isinstance(r, dict):
+        return r
+    o = dict(r)
+    o.pop("feedName", None)
+    o.pop("centralRaw", None)
+    sm = re.sub(r"\s+", " ", str(o.get("summary") or "")).strip()
+    tt = re.sub(r"\s+", " ", str(o.get("title") or "")).strip()
+    if sm and tt and (sm == tt or tt.find(sm) >= 0 or sm.find(tt) >= 0):
+        o.pop("summary", None)
+    return o
+
+
+def slim_items(rows):
+    return [slim_row(r) for r in (rows or [])]
+
+
 def dedupe(rows):
     # الرابط المحلول يغلب المبهم عند تساوى العنوان — مقيس ٥/٩: الخبر الواحد
     # يعود من زاويتين بطابعَى نشر مختلفين، فكان الأحدث (المبهم) يطرد نسخته
@@ -550,7 +572,7 @@ def main():
         results.append((f, items, why))
     ok_feeds = sum(1 for _, it, _ in results if it)
     empty = [f["name"] for f, it, _ in results if not it]
-    fresh = dedupe([r for _, it, _ in results for r in it])
+    fresh = slim_items(dedupe([r for _, it, _ in results for r in it]))
     now = int(time.time() * 1000)
     cur = read_json(NEWS_URL, timeout=30)
     prev_status = ((cur or {}).get("health") or {}).get("feedStatus") or []
@@ -571,7 +593,7 @@ def main():
         if purge_ok and fid and fid not in active_ids: purged += 1; continue
         try:
             if datetime.fromisoformat(r["publishedAt"].replace("Z", "+00:00")).timestamp() * 1000 >= cutoff:
-                old_items.append(r)
+                old_items.append(slim_row(r))
         except Exception: continue
     if purged: print("كُنس %d عنصراً من زوايا متقاعدة" % purged)
     merged = dedupe(fresh + old_items)
