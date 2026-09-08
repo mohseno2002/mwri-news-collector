@@ -13,7 +13,14 @@ from email.utils import parsedate_to_datetime
 RTDB = "https://ismailia-64500-default-rtdb.europe-west1.firebasedatabase.app"
 NEWS_URL = RTDB + "/mwri/apps/irrigation-social-monitor/data/central/news.json"
 JOB_URL = RTDB + "/mwri/jobs/news-central.json"
-SOURCES_URL = os.environ.get("COLLECT_SOURCES_URL") or "https://mohseno2002.github.io/irrigation-social-monitor/sources-config.js"  # التجاوز للمسبار وحده
+# ٨/٩/٢٠٢٦ — مصدران بالترتيب لا واحد. الجذر المقيس: GitHub Pages للتطبيق
+# أُطفئت (has_pages=false ⇒ «Site not found») فردّ الرابط 404 على كل جولة،
+# فخرج المجمّع برمز 2 كل ٢٥ دقيقة ولم يُجمع خبر جوجل واحد لثلاث ساعات — بينما
+# وركر كلاودفلير يخدم نفس الملف بايتاً ببايت (٢٠٢١٤). الوركر أولاً لأنه أصل
+# التطبيق الحى، وPages احتياطاً فتتعافى القراءة تلقائياً لو أُعيد تفعيلها.
+SOURCES_URLS = ["https://irrigation-social-monitor.mohseno2002.workers.dev/sources-config.js",
+                "https://mohseno2002.github.io/irrigation-social-monitor/sources-config.js"]
+SOURCES_URL = os.environ.get("COLLECT_SOURCES_URL") or SOURCES_URLS[0]  # التجاوز للمسبار وحده
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36 MWRI-NewsCollector/1.0"
 NEWS_DAYS, NEWS_LIMIT, FEED_LIMIT, WAVE, WAVE_GAP, TIMEOUT, RETRIES = 7, 800, 40, 4, 1.5, 15, 2
 # SLICE: عدد الزوايا لكل جولة. الحدّ الخطر مقيس ٣/٩: ~٢٨٠٠ طلب/يوم من مخرج
@@ -129,7 +136,14 @@ def gate_text(r): return clean(r.get("title"))[:190] + " " + clean(r.get("summar
 
 def load_feeds():
     try:
-        _, js = http(SOURCES_URL, timeout=15)
+        urls = [SOURCES_URL] + [u for u in SOURCES_URLS if u != SOURCES_URL]
+        js, why = None, ""
+        for u in urls:
+            try:
+                _, js = http(u, timeout=15); break
+            except Exception as ex:
+                why += "%s: %s | " % (u.split("/")[2], ex); js = None
+        if js is None: raise RuntimeError(why.strip(" |"))
         full_js = js
         # ٥/٩/٢٠٢٦ — قصّ الملف عند قائمة المتقاعدين قبل التنزيع. التنزيع هنا
         # بتعبير نمطى على الملف كله لا بقراءة الكائن المُصدَّر، فإخراج زاوية
