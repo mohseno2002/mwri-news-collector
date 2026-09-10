@@ -179,11 +179,53 @@ def feed_url(q, days=FETCH_DAYS_FAST):
     if q[:7].lower() == "http://" or q[:8].lower() == "https://": return q
     return "https://news.google.com/rss/search?q=" + urllib.parse.quote(q + " when:%dd" % days, safe="") + "&hl=ar&gl=EG&ceid=EG:ar"
 
+def atom_date(block):
+    # أتوم يستعمل ISO 8601 لا صيغة RFC البريدية — و parsedate_to_datetime يسقط
+    # عليها فيُختم العنصر بتاريخ اللحظة (تزييف صامت لترتيب الأخبار وقياس التأخير).
+    raw = clean(field(block, "updated")) or clean(field(block, "published"))
+    if raw:
+        try: return datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except Exception: pass
+        try: return parsedate_to_datetime(raw)
+        except Exception: pass
+    return None
+
+
+def parse_atom(xml, feed):
+    """موجز أتوم: <entry> بدل <item>، والرابط فى سمة href لا فى نصّ الوسم."""
+    out = []
+    for part in re.split(r"<entry[\s>]", xml, flags=re.I)[1:PARSE_MAX + 1]:
+        block = re.split(r"</entry>", part, flags=re.I)[0]
+        title = strip(field(block, "title"))
+        if not title: continue
+        url = ""
+        links = re.findall(r"<link\b([^>]*)>", block, flags=re.I)
+        for attrs in links:
+            href = re.search(r'href="([^"]+)"', attrs)
+            if not href: continue
+            rel = re.search(r'rel="([^"]+)"', attrs)
+            if url and rel and rel.group(1).lower() != "alternate": continue
+            url = clean(href.group(1))
+            if not rel or rel.group(1).lower() == "alternate": break
+        summary = strip(field(block, "summary")) or strip(field(block, "content"))
+        if summary == title or summary.startswith(title + " "): summary = summary[len(title):].strip()
+        pub = atom_date(block) or datetime.now(timezone.utc)
+        out.append({"centralRaw": 1, "sourceName": (strip(field(block, "source")) or "موقع إخباري")[:120],
+                    "title": title[:190], "summary": (summary or title)[:220], "url": url[:4000],
+                    "publishedAt": pub.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                    "feedId": feed["id"], "feedName": feed["name"]})
+    out.sort(key=lambda r: r["publishedAt"], reverse=True)
+    return out[:FEED_LIMIT]
+
+
 def parse_rss(xml, feed):
     # ٦/٩/٢٠٢٦ — القصّ عند FEED_LIMIT كان يتم على **ترتيب الموجز** قبل التنزيع،
     # وموجز البحث غير مرتَّب زمنياً (مقيس: official يرجع ٨٤ عنصراً بترتيب غير
     # تنازلى)، فكان أحدث خبر قد يقع خارج الأربعين ويضيع. الآن: تنزيع الكل ثم
     # ترتيب تنازلى بالتاريخ ثم قصّ — فالمقصوص هو الأقدم دائماً.
+    # لا <item> ووُجد <entry> ⇒ موجز أتوم. مسار RSS يبقى كما هو حرفياً.
+    if not re.search(r"<item[\s>]", xml, flags=re.I) and re.search(r"<entry[\s>]", xml, flags=re.I):
+        return parse_atom(xml, feed)
     out = []
     for part in re.split(r"<item>", xml, flags=re.I)[1:PARSE_MAX + 1]:
         block = re.split(r"</item>", part, flags=re.I)[0]
@@ -216,7 +258,7 @@ def fetch_one(url):
         # الخنق الناعم من جوجل: HTTP 200 بموجز RSS سليم وصفر <item>. كان يُحسب
         # نجاحاً فلا يدخل errors[] ولا تُعاد محاولته — وهو الفشل السائد فعلاً
         # (مقيس ٣/٩: ١٤/٢٩ زاوية «empty» بلا سبب واحد معلَن).
-        if not re.search(r"<item[\s>]", body, re.I):
+        if not re.search(r"<(item|entry)[\s>]", body, re.I):
             # عيّنة من ردّ جوجل الحقيقى: الفرق بين «موجز سليم بصفر نتيجة»
             # و«صفحة موافقة/اعتراض» لا يُعرف من رمز الحالة. مقيس ٣/٩: نفس
             # الكود ١٠/١٠ من حاوية أنثروبيك و٠/١٠ من عامل GitHub.
