@@ -40,6 +40,8 @@ jobs:
       - name: Validate collection schedule and merge contracts
         id: contracts
         run: python3 -m unittest -v test_schedule.py
+      - name: Probe feed parsers (RSS + Atom)
+        run: python3 p_atom.py
       - name: watch (~25 min) and collect every 15 min when due
         env:
           WATCH_RUN_SEC: "1500"
