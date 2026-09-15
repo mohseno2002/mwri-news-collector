@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - "collect_news.py"
+      - "daily_brief.py"
+      - "p_brief.py"
       - "watch_loop.py"
       - "test_schedule.py"
       - ".github/workflows/collect.yml"
@@ -42,10 +44,13 @@ jobs:
         run: python3 -m unittest -v test_schedule.py
       - name: Probe feed parsers (RSS + Atom)
         run: python3 p_atom.py
+      - name: Probe daily brief
+        run: python3 p_brief.py
       - name: watch (~25 min) and collect every 15 min when due
         env:
           WATCH_RUN_SEC: "1500"
           WATCH_POLL_SEC: "20"
+          MWRI_AI_KEY: ${{ secrets.MWRI_AI_KEY }}
         run: python3 watch_loop.py
       - name: chain next round
         if: always() && steps.contracts.outcome == 'success'
