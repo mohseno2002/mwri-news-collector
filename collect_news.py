@@ -13,6 +13,11 @@ from email.utils import parsedate_to_datetime
 RTDB = "https://ismailia-64500-default-rtdb.europe-west1.firebasedatabase.app"
 NEWS_URL = RTDB + "/mwri/apps/irrigation-social-monitor/data/central/news.json"
 JOB_URL = RTDB + "/mwri/jobs/news-central.json"
+BRIEF_URL = RTDB + "/mwri/apps/irrigation-social-monitor/data/central/brief.json"
+# موجز اليوم: يُحسب مرة كل ١٥ دقيقة على الأكثر عبر بوابة الذكاء (مفتاح
+# التطبيق فى سرّ MWRI_AI_KEY). غيابه = لا موجز، والجولة تكمل كما هى.
+AI_KEY = os.environ.get("MWRI_AI_KEY") or ""
+BRIEF_MIN_GAP_SEC = 900
 # ٨/٩/٢٠٢٦ — مصدران بالترتيب لا واحد. الجذر المقيس: GitHub Pages للتطبيق
 # أُطفئت (has_pages=false ⇒ «Site not found») فردّ الرابط 404 على كل جولة،
 # فخرج المجمّع برمز 2 كل ٢٥ دقيقة ولم يُجمع خبر جوجل واحد لثلاث ساعات — بينما
@@ -670,6 +675,25 @@ def main():
     if r_done or named: merged = dedupe(merged)
     resolve_stat = {"done": r_done, "fail": r_fail, "waiting": r_wait, "named": named}
     print("حلّ الروابط: %d حُلّ · %d فشل · %d بالانتظار" % (r_done, r_fail, resolve_stat["waiting"]))
+    # موجز اليوم — بعد الدمج وحلّ الروابط ليحمل العناوين النهائية. معزول
+    # تماماً: أى فشل فيه لا يمسّ اللقطة ولا يغيّر رمز خروج الجولة.
+    brief_note = "بلا مفتاح" if not AI_KEY else ""
+    if AI_KEY:
+        try:
+            since = int(started) - int(job.get("briefAt") or 0)
+            if since < BRIEF_MIN_GAP_SEC:
+                brief_note = "هدنة (%d ث)" % since
+            else:
+                import daily_brief
+                brief, brief_note = daily_brief.build(merged, int(started * 1000), AI_KEY)
+                if brief:
+                    write(BRIEF_URL, "PUT", brief, timeout=30)
+                    write(JOB_URL, "PATCH", {"briefAt": int(started), "brief": {
+                        "at": brief["at"], "n": brief["n"], "by": brief["by"]}}, timeout=20)
+        except Exception as e:
+            brief_note = "تعذّر: " + str(e)[:120]
+    print("موجز اليوم:", brief_note)
+
     status = merge_status(prev_status, results, now, active_ids if purge_ok else None)
     live_ok = sum(1 for r in status if r.get("state") == "ok")
     lat48 = [x for x in ((job.get("latencyLog") or []) if isinstance(job.get("latencyLog"), list) else []) if isinstance(x, dict) and x.get("medianMin") is not None and started * 1000 - (x.get("at") or 0) <= 48 * 3600000]
